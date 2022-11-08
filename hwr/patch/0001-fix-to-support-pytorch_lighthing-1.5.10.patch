@@ -1,0 +1,25 @@
+From b404738043021b0ec66e4130d2debf8617cc6dda Mon Sep 17 00:00:00 2001
+From: jseong <jseong82.kim@samsung.com>
+Date: Thu, 19 May 2022 09:06:52 +0000
+Subject: [PATCH] fix to support pytorch_lighthing >= 1.5.10
+
+---
+ src/model_torch.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/model_torch.py b/src/model_torch.py
+index 5d54081..af0be71 100644
+--- a/src/model_torch.py
++++ b/src/model_torch.py
+@@ -9,7 +9,7 @@ import pytorch_lightning as pl
+ from torch.utils.data import random_split
+ import logging
+ import torch.optim.lr_scheduler as lrs
+-from pytorch_lightning.metrics import Accuracy
++from torchmetrics.functional import accuracy
+ import pytorch_lightning as pl
+ from pytorch_lightning import seed_everything
+ from pytorch_lightning import loggers as pl_loggers
+-- 
+2.17.1
+

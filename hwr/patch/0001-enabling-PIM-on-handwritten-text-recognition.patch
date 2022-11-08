@@ -1,0 +1,1800 @@
+From b8c0f6f8282fe0c5bf1510eb447eb813d3368d53 Mon Sep 17 00:00:00 2001
+From: Ankur Deshwal <a.deshwal@samsung.com>
+Date: Mon, 19 Apr 2021 23:41:10 +0530
+Subject: [PATCH]  enabling PIM on handwritten text recognition
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+     1. Introduce pytorch model for puicerver
+     2. Update before transfering responsibility for training
+     3. Add pytorch model for HWR
+     4. Lightning pipeline for training HWR model
+      - Model torch has pytorch lightning training pipeline for HWR puigcerver model
+      - pytorch_dataloader handles data_loading and pre-rocessing from iam.hdf5 file
+      - puigcerver_train calls scripts and launches training
+     5. Add testing pipeline in pytorch lightning
+     6. Turn off image augmentation and normalization
+     7. Changes to track weight changes across epochs
+      - added histograms in model_torch
+     8. Pre-processing file for hdf5 files
+     9. README for HWR dataset
+    10. Update README.md
+    11. Changes for experimentation and training
+    12. Changes for experimentation
+    13. Final changes for working pipeline in Pytorch
+    14. Add iam file path
+    15. Changing unnecesary files
+    16. Update README.md
+    17. Support checkpointing in pytorch lightning
+    18. Update README.md
+    19. feat: 🎸 Add pytoch test script
+     - Add pytorh test script to verify trained model. Also generates pytorch
+     - pth file and torchscript file for later use.
+    20. Support FP16 inference and NNRuntime test
+     - Support FP16 inference
+     - Integrate NNRuntime into HWR
+     - Support Performance test
+     - Update README
+    21. feat: 🎸 Support compile_level with NNRuntime backend
+     - Support compile_level
+     - Update doc for compile_level usage
+    22. feat: 🎸 Add pim init and deinit for hwr
+     - Add pim init and deinit for hwr in pytorch_test.py
+    23. feat: 🎸 Change model_file arg optional when compile_level is 0
+     - Change model_file arg optional when compile_level is 0
+    24. Adapt NNCompiler python api for hwr model
+
+ Contributors:
+    adi.saluja <adi.saluja@samsung.com>
+    hao11.wang<hao11.wang@samsung.com>
+    penghui.wei <penghui.wei@samsung.com>
+    yao01.xiao<yao01.xiao@samsung.com>
+---
+ .gitignore                   |   6 +
+ README.md                    |   5 +
+ notebook/HWR-lightning.ipynb | 473 +++++++++++++++++++++++++++++++++++
+ requirements.txt             |   2 +
+ src/README.md                |  90 +++++++
+ src/data/generator.py        |  10 +-
+ src/dataloader.py            | 150 +++++++++++
+ src/main.py                  |  85 ++++---
+ src/model_torch.py           | 308 +++++++++++++++++++++++
+ src/network/model.py         |  26 +-
+ src/pytorch_test.py          | 299 ++++++++++++++++++++++
+ src/run_eval.sh              |  16 ++
+ 12 files changed, 1426 insertions(+), 44 deletions(-)
+ create mode 100644 notebook/HWR-lightning.ipynb
+ create mode 100644 src/README.md
+ create mode 100644 src/dataloader.py
+ create mode 100644 src/model_torch.py
+ create mode 100644 src/pytorch_test.py
+ create mode 100755 src/run_eval.sh
+
+diff --git a/.gitignore b/.gitignore
+index 1096190..49813af 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -118,3 +118,9 @@ venv.bak/
+ 
+ # mypy
+ .mypy_cache/
++
++*.pt
++*.ckpt
++*.hdf5
++
++run_log/
+diff --git a/README.md b/README.md
+index f720d5f..fb84c0d 100644
+--- a/README.md
++++ b/README.md
+@@ -1,3 +1,4 @@
++
+ <img src="https://github.com/arthurflor23/handwritten-text-recognition/blob/master/doc/image/header.png?raw=true">
+ 
+ Handwritten Text Recognition (HTR) system implemented using [TensorFlow 2.x](https://www.tensorflow.org/) and trained on the Bentham/IAM/Rimes/Saint Gall/Washington offline HTR datasets. This Neural Network model recognizes the text contained in the images of segmented texts lines.
+@@ -11,6 +12,10 @@ Data partitioning (train, validation, test) was performed following the methodol
+ 3. Check out the presentation in the **doc** folder.
+ 4. For more information and demo run step by step, check out the **[tutorial](https://github.com/arthurflor23/handwritten-text-recognition/blob/master/src/tutorial.ipynb)** on Google Colab/Drive.
+ 
++## How to run
++Refer to **src/README.md**
++
++
+ ## Datasets supported
+ 
+ a. [Bentham](http://transcriptorium.eu/datasets/bentham-collection/)
+diff --git a/notebook/HWR-lightning.ipynb b/notebook/HWR-lightning.ipynb
+new file mode 100644
+index 0000000..e05844a
+--- /dev/null
++++ b/notebook/HWR-lightning.ipynb
+@@ -0,0 +1,473 @@
++{
++ "cells": [
++  {
++   "cell_type": "code",
++   "execution_count": 228,
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "import os\n",
++    "import torch\n",
++    "from torch import nn\n",
++    "import torch.nn.functional as F\n",
++    "import pytorch_lightning as pl\n",
++    "import numpy as np\n",
++    "from torchsummaryX import summary"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": 255,
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "class LitModel(pl.LightningModule):\n",
++    "    def __init__(self):\n",
++    "        super().__init__()\n",
++    "\n",
++    "        ## Conv Layers\n",
++    "        self.conv_l1 = nn.Conv2d(in_channels=1, out_channels=16, kernel_size=(3, 3), stride=(1, 1), padding=1)\n",
++    "        self.bn_l1 = nn.BatchNorm2d(16)\n",
++    "            \n",
++    "        self.conv_l2 = nn.Conv2d(in_channels=16, out_channels=32, kernel_size=(3, 3), stride=(1, 1), padding=1)\n",
++    "        self.bn_l2 = nn.BatchNorm2d(32)\n",
++    "        \n",
++    "        self.conv_l3 = nn.Conv2d(in_channels=32, out_channels=48, kernel_size=(3, 3), stride=(1, 1), padding=1)\n",
++    "        self.bn_l3 = nn.BatchNorm2d(48)\n",
++    "        \n",
++    "        self.conv_l4 = nn.Conv2d(in_channels=48, out_channels=64, kernel_size=(3, 3), stride=(1, 1), padding=1)\n",
++    "        self.bn_l4 = nn.BatchNorm2d(64)\n",
++    "        \n",
++    "        self.conv_l5 = nn.Conv2d(in_channels=64, out_channels=80, kernel_size=(3, 3), stride=(1, 1), padding=1)\n",
++    "        self.bn_l5 = nn.BatchNorm2d(80)\n",
++    "        \n",
++    "        self.leakyRelu = torch.nn.LeakyReLU(negative_slope=0.01)\n",
++    "        self.pool = torch.nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2), padding=0)\n",
++    "        self.dropout = torch.nn.Dropout(p=0.2)\n",
++    "        \n",
++    "        self.lstm_l1 = torch.nn.LSTM(input_size=1280, hidden_size=256, batch_first=True, bidirectional=True, num_layers=5)\n",
++    "        \n",
++    "        \n",
++    "        \n",
++    "    def forward(self,x):\n",
++    "        \n",
++    "        ## Conv Layers \n",
++    "        x = self.conv_l1(x)\n",
++    "        x = self.bn_l1(x)\n",
++    "        x = self.leakyRelu(x)\n",
++    "        x = self.pool(x)\n",
++    "        \n",
++    "        x = self.conv_l2(x)\n",
++    "        x = self.bn_l2(x)\n",
++    "        x = self.leakyRelu(x)\n",
++    "        x = self.pool(x)\n",
++    "        \n",
++    "        x = self.dropout(x)\n",
++    "        x = self.conv_l3(x)\n",
++    "        x = self.bn_l3(x)\n",
++    "        x = self.leakyRelu(x)\n",
++    "        x = self.pool(x)\n",
++    "                \n",
++    "        x = self.dropout(x)\n",
++    "        x = self.conv_l4(x)\n",
++    "        x = self.bn_l4(x)\n",
++    "        x = self.leakyRelu(x)\n",
++    "        \n",
++    "        x = self.dropout(x)\n",
++    "        x = self.conv_l5(x)\n",
++    "        x = self.bn_l5(x)\n",
++    "        x = self.leakyRelu(x)\n",
++    "        \n",
++    "        ## LSTM\n",
++    "        x = x.view(1, 128, -1)\n",
++    "        #batch_size, num_channels, input_size = x.shape\n",
++    "        #print (batch_size, num_channels, input_size)\n",
++    "        #print (type(x))\n",
++    "        \n",
++    "        h0 = torch.randn(5*2, 1, 256).to(\"cuda\")\n",
++    "        c0 = torch.randn(5*2, 1, 256).to(\"cuda\")\n",
++    "        \n",
++    "        x,(hn,cn) = self.lstm_l1(x,(h0,c0))\n",
++    "        \n",
++    "        return x\n",
++    "\n",
++    "    def configure_optimizers(self):\n",
++    "        optimizer = torch.optim.Adam (self.parameters(), lr=1e-3)\n",
++    "        return optimizer\n",
++    "    \n",
++    "    def training_step(self, batch, batch_idx):\n",
++    "        x,y = batch\n",
++    "        y_hat = self(x)\n",
++    "        loss = F.cross_entropy(y_hat, y)\n",
++    "        return loss"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": 256,
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "model = LitModel().to(\"cuda\")"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": 257,
++   "metadata": {},
++   "outputs": [
++    {
++     "name": "stdout",
++     "output_type": "stream",
++     "text": [
++      "========================================================================\n",
++      "                Kernel Shape        Output Shape     Params    Mult-Adds\n",
++      "Layer                                                                   \n",
++      "0_conv_l1      [1, 16, 3, 3]  [1, 16, 1024, 128]      160.0   18.874368M\n",
++      "1_bn_l1                 [16]  [1, 16, 1024, 128]       32.0         16.0\n",
++      "2_leakyRelu                -  [1, 16, 1024, 128]          -            -\n",
++      "3_pool                     -    [1, 16, 512, 64]          -            -\n",
++      "4_conv_l2     [16, 32, 3, 3]    [1, 32, 512, 64]      4.64k  150.994944M\n",
++      "5_bn_l2                 [32]    [1, 32, 512, 64]       64.0         32.0\n",
++      "6_leakyRelu                -    [1, 32, 512, 64]          -            -\n",
++      "7_pool                     -    [1, 32, 256, 32]          -            -\n",
++      "8_dropout                  -    [1, 32, 256, 32]          -            -\n",
++      "9_conv_l3     [32, 48, 3, 3]    [1, 48, 256, 32]    13.872k  113.246208M\n",
++      "10_bn_l3                [48]    [1, 48, 256, 32]       96.0         48.0\n",
++      "11_leakyRelu               -    [1, 48, 256, 32]          -            -\n",
++      "12_pool                    -    [1, 48, 128, 16]          -            -\n",
++      "13_dropout                 -    [1, 48, 128, 16]          -            -\n",
++      "14_conv_l4    [48, 64, 3, 3]    [1, 64, 128, 16]    27.712k   56.623104M\n",
++      "15_bn_l4                [64]    [1, 64, 128, 16]      128.0         64.0\n",
++      "16_leakyRelu               -    [1, 64, 128, 16]          -            -\n",
++      "17_dropout                 -    [1, 64, 128, 16]          -            -\n",
++      "18_conv_l5    [64, 80, 3, 3]    [1, 80, 128, 16]     46.16k    94.37184M\n",
++      "19_bn_l5                [80]    [1, 80, 128, 16]      160.0         80.0\n",
++      "20_leakyRelu               -    [1, 80, 128, 16]          -            -\n",
++      "21_lstm_l1                 -       [1, 128, 512]  9.457664M    9.437184M\n",
++      "------------------------------------------------------------------------\n",
++      "                           Totals\n",
++      "Total params            9.550688M\n",
++      "Trainable params        9.550688M\n",
++      "Non-trainable params          0.0\n",
++      "Mult-Adds             443.547888M\n",
++      "========================================================================\n"
++     ]
++    },
++    {
++     "data": {
++      "text/html": [
++       "<div>\n",
++       "<style scoped>\n",
++       "    .dataframe tbody tr th:only-of-type {\n",
++       "        vertical-align: middle;\n",
++       "    }\n",
++       "\n",
++       "    .dataframe tbody tr th {\n",
++       "        vertical-align: top;\n",
++       "    }\n",
++       "\n",
++       "    .dataframe thead th {\n",
++       "        text-align: right;\n",
++       "    }\n",
++       "</style>\n",
++       "<table border=\"1\" class=\"dataframe\">\n",
++       "  <thead>\n",
++       "    <tr style=\"text-align: right;\">\n",
++       "      <th></th>\n",
++       "      <th>Kernel Shape</th>\n",
++       "      <th>Output Shape</th>\n",
++       "      <th>Params</th>\n",
++       "      <th>Mult-Adds</th>\n",
++       "    </tr>\n",
++       "    <tr>\n",
++       "      <th>Layer</th>\n",
++       "      <th></th>\n",
++       "      <th></th>\n",
++       "      <th></th>\n",
++       "      <th></th>\n",
++       "    </tr>\n",
++       "  </thead>\n",
++       "  <tbody>\n",
++       "    <tr>\n",
++       "      <th>0_conv_l1</th>\n",
++       "      <td>[1, 16, 3, 3]</td>\n",
++       "      <td>[1, 16, 1024, 128]</td>\n",
++       "      <td>160.0</td>\n",
++       "      <td>18874368.0</td>\n",
++       "    </tr>\n",
++       "    <tr>\n",
++       "      <th>1_bn_l1</th>\n",
++       "      <td>[16]</td>\n",
++       "      <td>[1, 16, 1024, 128]</td>\n",
++       "      <td>32.0</td>\n",
++       "      <td>16.0</td>\n",
++       "    </tr>\n",
++       "    <tr>\n",
++       "      <th>2_leakyRelu</th>\n",
++       "      <td>-</td>\n",
++       "      <td>[1, 16, 1024, 128]</td>\n",
++       "      <td>NaN</td>\n",
++       "      <td>NaN</td>\n",
++       "    </tr>\n",
++       "    <tr>\n",
++       "      <th>3_pool</th>\n",
++       "      <td>-</td>\n",
++       "      <td>[1, 16, 512, 64]</td>\n",
++       "      <td>NaN</td>\n",
++       "      <td>NaN</td>\n",
++       "    </tr>\n",
++       "    <tr>\n",
++       "      <th>4_conv_l2</th>\n",
++       "      <td>[16, 32, 3, 3]</td>\n",
++       "      <td>[1, 32, 512, 64]</td>\n",
++       "      <td>4640.0</td>\n",
++       "      <td>150994944.0</td>\n",
++       "    </tr>\n",
++       "    <tr>\n",
++       "      <th>5_bn_l2</th>\n",
++       "      <td>[32]</td>\n",
++       "      <td>[1, 32, 512, 64]</td>\n",
++       "      <td>64.0</td>\n",
++       "      <td>32.0</td>\n",
++       "    </tr>\n",
++       "    <tr>\n",
++       "      <th>6_leakyRelu</th>\n",
++       "      <td>-</td>\n",
++       "      <td>[1, 32, 512, 64]</td>\n",
++       "      <td>NaN</td>\n",
++       "      <td>NaN</td>\n",
++       "    </tr>\n",
++       "    <tr>\n",
++       "      <th>7_pool</th>\n",
++       "      <td>-</td>\n",
++       "      <td>[1, 32, 256, 32]</td>\n",
++       "      <td>NaN</td>\n",
++       "      <td>NaN</td>\n",
++       "    </tr>\n",
++       "    <tr>\n",
++       "      <th>8_dropout</th>\n",
++       "      <td>-</td>\n",
++       "      <td>[1, 32, 256, 32]</td>\n",
++       "      <td>NaN</td>\n",
++       "      <td>NaN</td>\n",
++       "    </tr>\n",
++       "    <tr>\n",
++       "      <th>9_conv_l3</th>\n",
++       "      <td>[32, 48, 3, 3]</td>\n",
++       "      <td>[1, 48, 256, 32]</td>\n",
++       "      <td>13872.0</td>\n",
++       "      <td>113246208.0</td>\n",
++       "    </tr>\n",
++       "    <tr>\n",
++       "      <th>10_bn_l3</th>\n",
++       "      <td>[48]</td>\n",
++       "      <td>[1, 48, 256, 32]</td>\n",
++       "      <td>96.0</td>\n",
++       "      <td>48.0</td>\n",
++       "    </tr>\n",
++       "    <tr>\n",
++       "      <th>11_leakyRelu</th>\n",
++       "      <td>-</td>\n",
++       "      <td>[1, 48, 256, 32]</td>\n",
++       "      <td>NaN</td>\n",
++       "      <td>NaN</td>\n",
++       "    </tr>\n",
++       "    <tr>\n",
++       "      <th>12_pool</th>\n",
++       "      <td>-</td>\n",
++       "      <td>[1, 48, 128, 16]</td>\n",
++       "      <td>NaN</td>\n",
++       "      <td>NaN</td>\n",
++       "    </tr>\n",
++       "    <tr>\n",
++       "      <th>13_dropout</th>\n",
++       "      <td>-</td>\n",
++       "      <td>[1, 48, 128, 16]</td>\n",
++       "      <td>NaN</td>\n",
++       "      <td>NaN</td>\n",
++       "    </tr>\n",
++       "    <tr>\n",
++       "      <th>14_conv_l4</th>\n",
++       "      <td>[48, 64, 3, 3]</td>\n",
++       "      <td>[1, 64, 128, 16]</td>\n",
++       "      <td>27712.0</td>\n",
++       "      <td>56623104.0</td>\n",
++       "    </tr>\n",
++       "    <tr>\n",
++       "      <th>15_bn_l4</th>\n",
++       "      <td>[64]</td>\n",
++       "      <td>[1, 64, 128, 16]</td>\n",
++       "      <td>128.0</td>\n",
++       "      <td>64.0</td>\n",
++       "    </tr>\n",
++       "    <tr>\n",
++       "      <th>16_leakyRelu</th>\n",
++       "      <td>-</td>\n",
++       "      <td>[1, 64, 128, 16]</td>\n",
++       "      <td>NaN</td>\n",
++       "      <td>NaN</td>\n",
++       "    </tr>\n",
++       "    <tr>\n",
++       "      <th>17_dropout</th>\n",
++       "      <td>-</td>\n",
++       "      <td>[1, 64, 128, 16]</td>\n",
++       "      <td>NaN</td>\n",
++       "      <td>NaN</td>\n",
++       "    </tr>\n",
++       "    <tr>\n",
++       "      <th>18_conv_l5</th>\n",
++       "      <td>[64, 80, 3, 3]</td>\n",
++       "      <td>[1, 80, 128, 16]</td>\n",
++       "      <td>46160.0</td>\n",
++       "      <td>94371840.0</td>\n",
++       "    </tr>\n",
++       "    <tr>\n",
++       "      <th>19_bn_l5</th>\n",
++       "      <td>[80]</td>\n",
++       "      <td>[1, 80, 128, 16]</td>\n",
++       "      <td>160.0</td>\n",
++       "      <td>80.0</td>\n",
++       "    </tr>\n",
++       "    <tr>\n",
++       "      <th>20_leakyRelu</th>\n",
++       "      <td>-</td>\n",
++       "      <td>[1, 80, 128, 16]</td>\n",
++       "      <td>NaN</td>\n",
++       "      <td>NaN</td>\n",
++       "    </tr>\n",
++       "    <tr>\n",
++       "      <th>21_lstm_l1</th>\n",
++       "      <td>-</td>\n",
++       "      <td>[1, 128, 512]</td>\n",
++       "      <td>9457664.0</td>\n",
++       "      <td>9437184.0</td>\n",
++       "    </tr>\n",
++       "  </tbody>\n",
++       "</table>\n",
++       "</div>"
++      ],
++      "text/plain": [
++       "                Kernel Shape        Output Shape     Params    Mult-Adds\n",
++       "Layer                                                                   \n",
++       "0_conv_l1      [1, 16, 3, 3]  [1, 16, 1024, 128]      160.0   18874368.0\n",
++       "1_bn_l1                 [16]  [1, 16, 1024, 128]       32.0         16.0\n",
++       "2_leakyRelu                -  [1, 16, 1024, 128]        NaN          NaN\n",
++       "3_pool                     -    [1, 16, 512, 64]        NaN          NaN\n",
++       "4_conv_l2     [16, 32, 3, 3]    [1, 32, 512, 64]     4640.0  150994944.0\n",
++       "5_bn_l2                 [32]    [1, 32, 512, 64]       64.0         32.0\n",
++       "6_leakyRelu                -    [1, 32, 512, 64]        NaN          NaN\n",
++       "7_pool                     -    [1, 32, 256, 32]        NaN          NaN\n",
++       "8_dropout                  -    [1, 32, 256, 32]        NaN          NaN\n",
++       "9_conv_l3     [32, 48, 3, 3]    [1, 48, 256, 32]    13872.0  113246208.0\n",
++       "10_bn_l3                [48]    [1, 48, 256, 32]       96.0         48.0\n",
++       "11_leakyRelu               -    [1, 48, 256, 32]        NaN          NaN\n",
++       "12_pool                    -    [1, 48, 128, 16]        NaN          NaN\n",
++       "13_dropout                 -    [1, 48, 128, 16]        NaN          NaN\n",
++       "14_conv_l4    [48, 64, 3, 3]    [1, 64, 128, 16]    27712.0   56623104.0\n",
++       "15_bn_l4                [64]    [1, 64, 128, 16]      128.0         64.0\n",
++       "16_leakyRelu               -    [1, 64, 128, 16]        NaN          NaN\n",
++       "17_dropout                 -    [1, 64, 128, 16]        NaN          NaN\n",
++       "18_conv_l5    [64, 80, 3, 3]    [1, 80, 128, 16]    46160.0   94371840.0\n",
++       "19_bn_l5                [80]    [1, 80, 128, 16]      160.0         80.0\n",
++       "20_leakyRelu               -    [1, 80, 128, 16]        NaN          NaN\n",
++       "21_lstm_l1                 -       [1, 128, 512]  9457664.0    9437184.0"
++      ]
++     },
++     "execution_count": 257,
++     "metadata": {},
++     "output_type": "execute_result"
++    }
++   ],
++   "source": [
++    "summary(model.to(\"cuda\"), torch.zeros(1,1,1024,128).to(\"cuda\"))"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": 225,
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "inp = torch.rand(1, 1, 1024, 128).to(\"cuda\")"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": 226,
++   "metadata": {},
++   "outputs": [
++    {
++     "name": "stdout",
++     "output_type": "stream",
++     "text": [
++      "1280 1 128\n"
++     ]
++    },
++    {
++     "data": {
++      "text/plain": [
++       "torch.Size([1280, 1, 256])"
++      ]
++     },
++     "execution_count": 226,
++     "metadata": {},
++     "output_type": "execute_result"
++    }
++   ],
++   "source": [
++    "model(inp).shape"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": 227,
++   "metadata": {},
++   "outputs": [
++    {
++     "ename": "ModuleAttributeError",
++     "evalue": "'LitModel' object has no attribute 'summary'",
++     "output_type": "error",
++     "traceback": [
++      "\u001b[0;31m---------------------------------------------------------------------------\u001b[0m",
++      "\u001b[0;31mModuleAttributeError\u001b[0m                      Traceback (most recent call last)",
++      "\u001b[0;32m<ipython-input-227-5f15418b3570>\u001b[0m in \u001b[0;36m<module>\u001b[0;34m\u001b[0m\n\u001b[0;32m----> 1\u001b[0;31m \u001b[0mmodel\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0msummary\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0m",
++      "\u001b[0;32m~/virtualenvs/pytorch-host/lib/python3.8/site-packages/torch/nn/modules/module.py\u001b[0m in \u001b[0;36m__getattr__\u001b[0;34m(self, name)\u001b[0m\n\u001b[1;32m    776\u001b[0m             \u001b[0;32mif\u001b[0m \u001b[0mname\u001b[0m \u001b[0;32min\u001b[0m \u001b[0mmodules\u001b[0m\u001b[0;34m:\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    777\u001b[0m                 \u001b[0;32mreturn\u001b[0m \u001b[0mmodules\u001b[0m\u001b[0;34m[\u001b[0m\u001b[0mname\u001b[0m\u001b[0;34m]\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0;32m--> 778\u001b[0;31m         raise ModuleAttributeError(\"'{}' object has no attribute '{}'\".format(\n\u001b[0m\u001b[1;32m    779\u001b[0m             type(self).__name__, name))\n\u001b[1;32m    780\u001b[0m \u001b[0;34m\u001b[0m\u001b[0m\n",
++      "\u001b[0;31mModuleAttributeError\u001b[0m: 'LitModel' object has no attribute 'summary'"
++     ]
++    }
++   ],
++   "source": [
++    "model."
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": null,
++   "metadata": {},
++   "outputs": [],
++   "source": []
++  }
++ ],
++ "metadata": {
++  "kernelspec": {
++   "display_name": "Python 3",
++   "language": "python",
++   "name": "python3"
++  },
++  "language_info": {
++   "codemirror_mode": {
++    "name": "ipython",
++    "version": 3
++   },
++   "file_extension": ".py",
++   "mimetype": "text/x-python",
++   "name": "python",
++   "nbconvert_exporter": "python",
++   "pygments_lexer": "ipython3",
++   "version": "3.8.5"
++  }
++ },
++ "nbformat": 4,
++ "nbformat_minor": 4
++}
+diff --git a/requirements.txt b/requirements.txt
+index 0fc68a5..8f8e99f 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -3,3 +3,5 @@ kaldiio>=2.17.2
+ opencv-python>=4.5.1.48
+ tensorflow>=2.4.1
+ tqdm>=4.56.0
++pytorch-lightning
++matplotlib
+diff --git a/src/README.md b/src/README.md
+new file mode 100644
+index 0000000..6c59673
+--- /dev/null
++++ b/src/README.md
+@@ -0,0 +1,90 @@
++# Inference
++
++Here provide the script `handwritten-text-recognition/src/run_eval.sh`
++
++Provide these 2 files on handwritten-text-recognition/src
++* dataset: iam.hdf5
++* pretained_model: last.ckpt
++
++## Accuracy
++
++```
++python3 pytorch_test.py \
++    --arch=puigcerver \
++    --source=iam \
++    --test \
++    --batch_size=1 \
++    --epochs=100 \
++    --gpus 1 \
++    --resume_from \
++    --checkpoint=last.ckpt \    # the pretrained model
++    --precision=FP16 \          # [FP32, FP16], NNRuntime only support FP16
++    --backend=NNRuntime \       # [pytorch, NNRuntime]
++    --compile_level=1   \       # [0, 1], if compile_level=1, model_file is GraphIR, if compile_level=0, model_file is torchScript model
++    --model_file=path/to/model \ # If choose backend=NNRUntime, set ir_file or torchscript file
++    --accuracy
++```
++
++## Performance
++
++```
++python3 pytorch_test.py \
++    --arch=puigcerver \
++    --source=iam \
++    --test \
++    --batch_size=1 \
++    --epochs=100 \
++    --gpus 1 \
++    --resume_from \
++    --checkpoint=last.ckpt \    # the pretrained model
++    --precision=FP16 \          # [FP32, FP16], NNRuntime only support FP16
++    --backend=NNRuntime \       # [pytorch, NNRuntime]
++    --compile_level=1   \       # [0, 1], if compile_level=1, model_file is GraphIR, if compile_level=0, model_file is torchScript model
++    --model_file=path/to/graph_ir_file  # If choose backend=NNRUntime, set ir_file or torchscript file
++```
++
++If test with **NNRuntime** backend, need to build & install `libNnrt` first, refer to: https://github.sec.samsung.net/PIM/NNCompiler/blob/develop/README.md
++
++---
++
++
++
++**Instructions to train the model on IAM dataset**:
++
++***Setup***
++* Setting up python libraries required
++```sh
++1. git clone -b pytorch  https://github.sec.samsung.net/FIM/handwritten-text-recognition.git
++2. cd handwritten-text-recognition
++3. pip3 install pytorch-lightning
++4. pip3 install scikit-build
++5. pip3 install -r requirements.txt
++```
++
++***Execution***
++* Make sure iam.hdf5 and last.ckpt file is located in src/ folder (iam.hdf5 and last.ckpt is present in /tmp at 75.12.84.57 server)
++```sh
++$ cd src/
++$ python3 main.py --source=iam --arch=puigcerver --epochs=100 --batch_size=16 --test --gpus 0 
++> Note. --test performs both training and testing in pytorch lightning
++```
++```sh
++$ python3 main.py --arch=puigcerver --source=iam --test --batch_size=16 --epochs=100 --gpus 0 --resume_from --checkpoint=last.ckpt 
++> Note. --resume_from and checkpoint argument allows us to resume training from last checkpoint and finally generates metrics on test dataset
++```
++
++* Tensorboard for training stats
++```sh
++$ tensorboard --bind_all --logdir hwr_final/
++```
++
++* Tested with following configuration
++```sh
++pytorch-lightning        1.1.0
++pytorch-lightning-bolts  0.2.5
++torch                    1.7.1+cu101
++torchaudio               0.7.2
++torchsummary             1.5.1
++torchvision              0.8.2+cu101
++CUDA Version: 10.1 
++```
+diff --git a/src/data/generator.py b/src/data/generator.py
+index 6c13bca..c503a80 100644
+--- a/src/data/generator.py
++++ b/src/data/generator.py
+@@ -54,7 +54,7 @@ class DataGenerator():
+                 self.index['train'] = 0
+ 
+                 if not self.stream:
+-                    np.random.shuffle(self.arange)
++                    #np.random.shuffle(self.arange)
+                     self.dataset['train']['dt'] = self.dataset['train']['dt'][self.arange]
+                     self.dataset['train']['gt'] = self.dataset['train']['gt'][self.arange]
+ 
+@@ -70,11 +70,14 @@ class DataGenerator():
+                                       width_shift_range=0.05,
+                                       erode_range=5,
+                                       dilate_range=3)
++            
+             x_train = pp.normalization(x_train)
++            
++            #print("x_train is", x_train)
+ 
+             y_train = [self.tokenizer.encode(y) for y in self.dataset['train']['gt'][index:until]]
+             y_train = [np.pad(y, (0, self.tokenizer.maxlen - len(y))) for y in y_train]
+-            y_train = np.asarray(y_train, dtype=np.int16)
++            y_train = np.asarray(y_train, dtype=np.int32)
+ 
+             yield (x_train, y_train)
+ 
+@@ -145,12 +148,11 @@ class Tokenizer():
+         groups = ["".join(group) for _, group in groupby(text)]
+         text = "".join([self.UNK_TK.join(list(x)) if len(x) > 1 else x for x in groups])
+         encoded = []
+-
+         for item in text:
+             index = self.chars.find(item)
+             index = self.UNK if index == -1 else index
+             encoded.append(index)
+-
++        #print(encoded)
+         return np.asarray(encoded)
+ 
+     def decode(self, text):
+diff --git a/src/dataloader.py b/src/dataloader.py
+new file mode 100644
+index 0000000..401770c
+--- /dev/null
++++ b/src/dataloader.py
+@@ -0,0 +1,150 @@
++import glob
++import torchvision.transforms as transforms
++import torch
++import h5py
++import numpy as np
++import matplotlib.pyplot as plt
++from PIL import Image as im
++from sklearn import preprocessing
++from data.generator import Tokenizer
++import data.preproc as pp
++import string
++from torch.utils.data import Dataset, TensorDataset, DataLoader
++from argparse import ArgumentParser
++
++### Global variables
++train_data = ()
++train_labels = ()
++val_data = ()
++val_labels = ()
++test_data = ()
++test_labels = ()
++tokenizer = Tokenizer(string.printable[:95], 128)
++# Test or Training, Loading all dataset is too slow
++#  if phase== Test, only load test_data
++phase = 'Test'   
++
++## Ensure that HDF5 file is in the cwd or specify path
++data = h5py.File('iam.hdf5', 'r')
++
++### Extract train,valid,test data from hdf5 file
++
++for group in data.keys():
++    print(group)
++    for dset in data[group].keys():
++        ds_data = data[group][dset]  # returns HDF5 dataset object
++        arr = data[group][dset][:]   # adding [:] returns a numpy array
++        if group == 'train':
++            if dset == 'dt':
++                train_data = arr
++            if dset == 'gt':
++                train_labels = arr
++
++        if group == 'test':
++            if dset == 'dt':
++                test_data = arr
++            if dset == 'gt':
++                test_labels = arr
++
++        if group == 'valid':
++            if dset == 'dt':
++                valid_data = arr
++            if dset == 'gt':
++                valid_labels = arr
++
++
++### Encode the labels that are the output sentences in the image recognitio task
++def preproc_labels(labels):
++    labels = [tokenizer.encode(y) for y in labels]
++    labels = [np.pad(y, (0, tokenizer.maxlen - len(y))) for y in labels]
++    labels = np.asarray(labels, dtype=np.int16)
++    return labels
++
++
++def visualize_data():
++    image1 = im.fromarray(train_data[0])
++    image2 = im.fromarray(train_data[1])
++    image1.save("line1.png")
++    image2.save("line2.png")
++    string_data = train_labels[0].decode('ASCII')
++    print("Printing converted string from byte array", string_data)
++
++
++def apply_transforms(data, labels, mode):
++
++    if (mode == 'train' or mode == 'valid'):
++        return_data = pp.augmentation(data,
++                                      rotation_range=1.5,
++                                      scale_range=0.05,
++                                      height_shift_range=0.025,
++                                      width_shift_range=0.05,
++                                      erode_range=5,
++                                      dilate_range=3)
++    else:
++        return_data = data
++
++    return_value = pp.normalization(return_data)
++
++    return_labels = preproc_labels(labels)
++
++    return return_value, return_labels
++
++if phase == 'Test':
++    te_data, te_labels = apply_transforms(test_data, test_labels, 'test')
++else:
++    tr_data, tr_labels = apply_transforms(train_data, train_labels, 'train')
++
++    te_data, te_labels = apply_transforms(test_data, test_labels, 'test')
++
++    val_data, val_labels = apply_transforms(valid_data, valid_labels, 'valid')
++
++
++def preprocess_hdf5_datasets(data, labels, mode, args):
++    data_list = []
++    for i in range(data.shape[0]):
++        img = data[i, :, :]
++        img = img[:, :]
++        shape = img.shape
++        img = img.reshape(1, shape[0], shape[1])
++        data_list.append(img)
++
++    label_list = []
++
++    for i in range(labels.shape[0]):
++        label = labels[i, :]
++        label = label[:]
++        label_list.append(label)
++
++    tensor_x = torch.Tensor(data_list)
++    tensor_y = torch.Tensor(label_list)
++
++    dataset = TensorDataset(tensor_x, tensor_y)  # create your datset
++
++    if mode == 'train' or mode == 'valid':
++        dataloader = DataLoader(dataset,
++                                batch_size=args.batch_size,
++                                shuffle=False,
++                                num_workers=16,
++                                drop_last=True)
++    else:
++        dataloader = DataLoader(dataset,
++                                batch_size=args.batch_size,
++                                num_workers=16,
++                                drop_last=True)
++    return dataloader
++
++
++def get_dataloaders(args):
++    global phase
++    if phase == 'Test':
++        test_dataloader = preprocess_hdf5_datasets(te_data, te_labels, 'test',
++                                               args)
++        valid_dataloader, train_dataloader = None, None
++    else:
++        train_dataloader = preprocess_hdf5_datasets(tr_data, tr_labels, 'train',
++                                                    args)
++        valid_dataloader = preprocess_hdf5_datasets(val_data, val_labels, 'valid',
++                                                    args)
++        test_dataloader = preprocess_hdf5_datasets(te_data, te_labels, 'test',
++                                                args)
++    return train_dataloader, valid_dataloader, test_dataloader
+diff --git a/src/main.py b/src/main.py
+index 568880c..00555a7 100644
+--- a/src/main.py
++++ b/src/main.py
+@@ -13,19 +13,23 @@ Provides options via the command line to perform project tasks.
+ * `--epochs`: number of epochs
+ * `--batch_size`: number of batches
+ """
+-
++import tensorflow as tf
+ import argparse
+ import cv2
+ import h5py
+ import os
+ import string
+ import datetime
+-
+ from data import preproc as pp, evaluation
+ from data.generator import DataGenerator, Tokenizer
+ from data.reader import Dataset
+ from network.model import HTRModel
++from model_torch import train_model
++from dataloader import get_dataloaders
++from argparse import ArgumentParser
+ 
++tf.compat.v1.enable_eager_execution()
++print("Eager mode execution : ", tf.executing_eagerly())
+ 
+ if __name__ == "__main__":
+     parser = argparse.ArgumentParser()
+@@ -40,15 +44,22 @@ if __name__ == "__main__":
+     parser.add_argument("--train", action="store_true", default=False)
+     parser.add_argument("--test", action="store_true", default=False)
+ 
+-    parser.add_argument("--norm_accentuation", action="store_true", default=False)
+-    parser.add_argument("--norm_punctuation", action="store_true", default=False)
++    parser.add_argument("--resume_from", action="store_true", default=False)
++    parser.add_argument("--checkpoint", type=str, required=False)
++    parser.add_argument("--norm_accentuation",
++                        action="store_true",
++                        default=False)
++    parser.add_argument("--norm_punctuation",
++                        action="store_true",
++                        default=False)
+ 
+-    parser.add_argument("--epochs", type=int, default=1000)
++    parser.add_argument("--epochs", type=int, default=100)
+     parser.add_argument("--batch_size", type=int, default=16)
++    parser.add_argument('--gpus', default=None)
+     args = parser.parse_args()
+ 
+     raw_path = os.path.join("..", "raw", args.source)
+-    source_path = os.path.join("..", "data", f"{args.source}.hdf5")
++    source_path = os.path.join(f"{args.source}.hdf5")
+     output_path = os.path.join("..", "output", args.source, args.arch)
+     target_path = os.path.join(output_path, "checkpoint_weights.hdf5")
+ 
+@@ -83,7 +94,8 @@ if __name__ == "__main__":
+             cv2.waitKey(0)
+ 
+     elif args.image:
+-        tokenizer = Tokenizer(chars=charset_base, max_text_length=max_text_length)
++        tokenizer = Tokenizer(chars=charset_base,
++                              max_text_length=max_text_length)
+ 
+         img = pp.preprocess(args.image, input_size=input_size)
+         x_test = pp.normalization([img])
+@@ -112,7 +124,6 @@ if __name__ == "__main__":
+         cv2.waitKey(0)
+ 
+     else:
+-        assert os.path.isfile(source_path) or os.path.isfile(target_path)
+         os.makedirs(output_path, exist_ok=True)
+ 
+         dtgen = DataGenerator(source=source_path,
+@@ -120,7 +131,6 @@ if __name__ == "__main__":
+                               charset=charset_base,
+                               max_text_length=max_text_length,
+                               predict=(not args.kaldi_assets) and args.test)
+-
+         model = HTRModel(architecture=args.arch,
+                          input_size=input_size,
+                          vocab_size=dtgen.tokenizer.vocab_size,
+@@ -132,12 +142,16 @@ if __name__ == "__main__":
+         model.load_checkpoint(target=target_path)
+ 
+         if args.kaldi_assets:
+-            predicts, _ = model.predict(x=dtgen.next_test_batch(), steps=dtgen.steps['test'], ctc_decode=False)
++            predicts, _ = model.predict(x=dtgen.next_test_batch(),
++                                        steps=dtgen.steps['test'],
++                                        ctc_decode=False)
+             pp.generate_kaldi_assets(output_path, dtgen, predicts)
+ 
+         elif args.train:
+             model.summary(output_path, "summary.txt")
+-            callbacks = model.get_callbacks(logdir=output_path, checkpoint=target_path, verbose=1)
++            callbacks = model.get_callbacks(logdir=output_path,
++                                            checkpoint=target_path,
++                                            verbose=1)
+ 
+             start_time = datetime.datetime.now()
+ 
+@@ -147,7 +161,7 @@ if __name__ == "__main__":
+                           validation_data=dtgen.next_valid_batch(),
+                           validation_steps=dtgen.steps['valid'],
+                           callbacks=callbacks,
+-                          shuffle=True,
++                          shuffle=False,
+                           verbose=1)
+ 
+             total_time = datetime.datetime.now() - start_time
+@@ -180,40 +194,35 @@ if __name__ == "__main__":
+ 
+         elif args.test:
+             start_time = datetime.datetime.now()
+-
+-            predicts, _ = model.predict(x=dtgen.next_test_batch(),
+-                                        steps=dtgen.steps['test'],
+-                                        ctc_decode=True,
+-                                        verbose=1)
+-
+-            predicts = [dtgen.tokenizer.decode(x[0]) for x in predicts]
+-            ground_truth = [x.decode() for x in dtgen.dataset['test']['gt']]
++            train_dataloader, valid_dataloader, test_dataloader = get_dataloaders(
++                args)
++            dl_list = [train_dataloader, valid_dataloader, test_dataloader]
++            predicts_test, _ = train_model(dl_list, args)
++            predicts_test = [
++                dtgen.tokenizer.decode(x[0]) for x in predicts_test
++            ]
++            ground_truth_test = [
++                x.decode() for x in dtgen.dataset['test']['gt']
++            ]
++            ground_truth_test = ground_truth_test[0:len(predicts_test)]
+ 
+             total_time = datetime.datetime.now() - start_time
+ 
+-            with open(os.path.join(output_path, "predict.txt"), "w") as lg:
+-                for pd, gt in zip(predicts, ground_truth):
+-                    lg.write(f"TE_L {gt}\nTE_P {pd}\n")
+-
+-            evaluate = evaluation.ocr_metrics(predicts=predicts,
+-                                              ground_truth=ground_truth,
+-                                              norm_accentuation=args.norm_accentuation,
+-                                              norm_punctuation=args.norm_punctuation)
++            evaluate_test = evaluation.ocr_metrics(
++                predicts=predicts_test,
++                ground_truth=ground_truth_test,
++                norm_accentuation=args.norm_accentuation,
++                norm_punctuation=args.norm_punctuation)
+ 
+             e_corpus = "\n".join([
+-                f"Total test images:    {dtgen.size['test']}",
+-                f"Total time:           {total_time}",
+-                f"Time per item:        {total_time / dtgen.size['test']}\n",
+-                f"Metrics:",
+-                f"Character Error Rate: {evaluate[0]:.8f}",
+-                f"Word Error Rate:      {evaluate[1]:.8f}",
+-                f"Sequence Error Rate:  {evaluate[2]:.8f}"
++                f"Total test images:    {dtgen.size['test']}", f"Metrics:",
++                f"Character Error Rate: {evaluate_test[0]:.8f}",
++                f"Word Error Rate:      {evaluate_test[1]:.8f}",
++                f"Sequence Error Rate:  {evaluate_test[2]:.8f}"
+             ])
+ 
+             sufix = ("_norm" if args.norm_accentuation or args.norm_punctuation else "") + \
+                     ("_accentuation" if args.norm_accentuation else "") + \
+                     ("_punctuation" if args.norm_punctuation else "")
+ 
+-            with open(os.path.join(output_path, f"evaluate{sufix}.txt"), "w") as lg:
+-                lg.write(e_corpus)
+-                print(e_corpus)
++            print(e_corpus)
+diff --git a/src/model_torch.py b/src/model_torch.py
+new file mode 100644
+index 0000000..5d54081
+--- /dev/null
++++ b/src/model_torch.py
+@@ -0,0 +1,308 @@
++import string
++import numpy as np
++import torch
++from torch import nn
++import torch.nn.functional as F
++from torchvision import transforms
++from torch.utils.data import DataLoader
++import pytorch_lightning as pl
++from torch.utils.data import random_split
++import logging
++import torch.optim.lr_scheduler as lrs
++from pytorch_lightning.metrics import Accuracy
++import pytorch_lightning as pl
++from pytorch_lightning import seed_everything
++from pytorch_lightning import loggers as pl_loggers
++from pytorch_lightning.loggers import TensorBoardLogger
++from pytorch_lightning.callbacks import EarlyStopping
++from pytorch_lightning.callbacks import ModelCheckpoint
++from matplotlib.backends.backend_pdf import PdfPages
++from matplotlib import pyplot as plt
++from pytorch_lightning.callbacks import LearningRateMonitor
++from data.generator import Tokenizer
++from tensorflow.keras import backend as K
++
++tokenizer = Tokenizer(string.printable[:95], 128)
++predicts_train, probabilities_train = [], []
++predicts_test, probabilities_test = [], []
++predicts_valid, probabilities_valid = [], []
++
++
++class Puigcerver_torch(pl.LightningModule):
++    def __init__(self, batch_size):
++        super().__init__()
++
++        ### Training Hyperparams
++        self.learning_rate = None
++        self.optimizer = None
++        self.batch_size = batch_size
++        self.criterion = nn.CTCLoss(blank=0, reduction='mean')
++
++        ### Conv Layers
++        inputs = np.full((batch_size), 128, dtype=np.int32)
++        self.input_lengths = torch.as_tensor(inputs)
++        self.conv_l1 = nn.Conv2d(in_channels=1,
++                                 out_channels=16,
++                                 kernel_size=(3, 3),
++                                 stride=(1, 1),
++                                 padding=1)
++        self.bn_l1 = nn.BatchNorm2d(16)
++
++        self.conv_l2 = nn.Conv2d(in_channels=16,
++                                 out_channels=32,
++                                 kernel_size=(3, 3),
++                                 stride=(1, 1),
++                                 padding=1)
++        self.bn_l2 = nn.BatchNorm2d(32)
++
++        self.conv_l3 = nn.Conv2d(in_channels=32,
++                                 out_channels=48,
++                                 kernel_size=(3, 3),
++                                 stride=(1, 1),
++                                 padding=1)
++        self.bn_l3 = nn.BatchNorm2d(48)
++
++        self.conv_l4 = nn.Conv2d(in_channels=48,
++                                 out_channels=64,
++                                 kernel_size=(3, 3),
++                                 stride=(1, 1),
++                                 padding=1)
++        self.bn_l4 = nn.BatchNorm2d(64)
++
++        self.conv_l5 = nn.Conv2d(in_channels=64,
++                                 out_channels=80,
++                                 kernel_size=(3, 3),
++                                 stride=(1, 1),
++                                 padding=1)
++        self.bn_l5 = nn.BatchNorm2d(80)
++
++        self.leakyRelu = torch.nn.LeakyReLU(negative_slope=0.01)
++        self.pool = torch.nn.MaxPool2d(kernel_size=(2, 2),
++                                       stride=(2, 2),
++                                       padding=0)
++        self.dropout = torch.nn.Dropout(p=0.2)
++
++        # LSTM layers
++        self.lstm_l1 = torch.nn.LSTM(input_size=1280,
++                                     hidden_size=256,
++                                     batch_first=True,
++                                     bidirectional=True,
++                                     dropout=0.5,
++                                     num_layers=5)
++
++        self.linear = torch.nn.Linear(512, 98)
++        self.softmax = torch.nn.Softmax(dim=2)
++
++    def forward(self, x):
++
++        ## Conv Layers
++        x = self.conv_l1(x)
++        x = self.bn_l1(x)
++        x = self.leakyRelu(x)
++        x = self.pool(x)
++
++        x = self.conv_l2(x)
++        x = self.bn_l2(x)
++        x = self.leakyRelu(x)
++        x = self.pool(x)
++
++        x = self.dropout(x)
++        x = self.conv_l3(x)
++        x = self.bn_l3(x)
++        x = self.leakyRelu(x)
++        x = self.pool(x)
++
++        x = self.dropout(x)
++        x = self.conv_l4(x)
++        x = self.bn_l4(x)
++        x = self.leakyRelu(x)
++
++        x = self.dropout(x)
++        x = self.conv_l5(x)
++        x = self.bn_l5(x)
++        x = self.leakyRelu(x)
++
++        ## LSTM
++        x = torch.transpose(x, 1, 2).reshape(self.batch_size, 128, 1280)
++        x, (hn, cn) = self.lstm_l1(x)
++        x = self.linear(x)
++        x = torch.nn.functional.log_softmax(x, dim=2)
++        x = torch.transpose(x, 0, 1)
++        return x
++
++    def custom_histogram_adder(self):
++        # iterating through all parameters
++        for name, params in self.named_parameters():
++            self.logger.experiment.add_histogram(name, params,
++                                                 self.current_epoch)
++
++    def training_step(self, batch, batch_nb):
++        """
++        Args:
++          batch: 
++          batch_nb: 
++        Returns:
++        """
++        x, y = batch
++        y_hat = self.forward(x)
++
++        label_lengths = (y != 0).sum(dim=1)
++        loss = self.criterion(y_hat, y, self.input_lengths, label_lengths)
++        ## Plots training loss against number of batches
++        self.log('train_loss',
++                 loss,
++                 on_step=True,
++                 on_epoch=True,
++                 prog_bar=True,
++                 logger=True)
++        batch_dictionary = {'loss': loss}
++        return batch_dictionary
++
++    def validation_step(self, batch, batch_nb):
++        """
++        Args:
++          batch: 
++          batch_nb: 
++        Returns:
++        """
++        x, y = batch
++        y_hat = self.forward(x)
++        label_lengths = (y != 0).sum(dim=1)
++        loss = self.criterion(y_hat, y, self.input_lengths, label_lengths)
++
++        ## Plots validation loss against number of batches
++        self.log('val_loss',
++                 loss,
++                 on_step=True,
++                 on_epoch=True,
++                 prog_bar=True,
++                 logger=True)
++        return {'val_loss': loss}
++
++    def training_epoch_end(self, outputs):
++        """
++        Args:
++          outputs: 
++        Returns:
++        """
++
++        train_avg_loss = torch.stack([x['loss'] for x in outputs]).mean()
++
++        ## Add Tensorboard Loggging metrics with respect to epochs instead of the default batch_size
++        self.logger.experiment.add_scalar("Loss/Train", train_avg_loss,
++                                          self.current_epoch)
++        self.custom_histogram_adder()
++
++    def validation_epoch_end(self, outputs):
++        """
++        Args:
++          outputs: 
++        Returns:
++        """
++        avg_loss = torch.stack([x['val_loss'] for x in outputs]).mean()
++        self.logger.experiment.add_scalar("Loss/Validation", avg_loss,
++                                          self.current_epoch)
++        results = {'val_loss_epoch': avg_loss}
++        return results
++
++    def configure_optimizers(self):
++        """ """
++        self.optimizer = torch.optim.RMSprop(self.parameters(),
++                                             lr=0.00001,
++                                             alpha=0.99,
++                                             momentum=0.9,
++                                             weight_decay=0.0001)
++
++        self.scheduler = lrs.ReduceLROnPlateau(self.optimizer,
++                                               mode='min',
++                                               factor=0.1)
++
++        return {
++            'optimizer': self.optimizer,
++            'lr_scheduler': self.scheduler,
++            'monitor': 'val_loss_epoch'
++        }
++
++    def test_step(self, batch, batch_nb):
++        x, y = batch
++        y_hat = self.forward(x)
++        label_lengths = (y != 0).sum(dim=1)
++        loss = self.criterion(y_hat, y, self.input_lengths, label_lengths)
++
++        ## Plots validation loss against number of batches
++        self.log('test_loss',
++                 loss,
++                 on_step=True,
++                 on_epoch=True,
++                 prog_bar=True,
++                 logger=True)
++
++        y_pred = torch.exp(y_hat)
++        y_pred = torch.transpose(y_pred, 0, 1)
++        y_pred = y_pred.cpu().numpy()
++        input_length = 128
++        y_test_len = np.asarray([input_length for _ in range(len(y_pred))])
++        decode, log = K.ctc_decode(y_pred,
++                                   y_test_len,
++                                   greedy=False,
++                                   beam_width=60,
++                                   top_paths=1)
++
++        probabilities_test.extend([np.exp(x) for x in log])
++        decode = [[[int(p) for p in x if p != -1] for x in y] for y in decode]
++        predicts_test.extend(np.swapaxes(decode, 0, 1))
++
++        return {'test_loss': loss}
++
++    def test_epoch_end(self, outputs):
++
++        avg_loss = torch.stack([x['test_loss'] for x in outputs]).mean()
++        self.logger.experiment.add_scalar("Loss/Test", avg_loss,
++                                          self.current_epoch)
++        results = {'test_loss_epoch': avg_loss}
++        return results
++
++
++def train_model(data_loaders, args):
++    train_dataloader = data_loaders[0]
++    val_dataloader = data_loaders[1]
++    test_dataloader = data_loaders[2]
++
++    classifier = Puigcerver_torch(args.batch_size)
++    ## sets seeds for numpy, torch, python.random and PYTHONHASHSEED.
++    seed_everything(21)
++    ## Initialize logger
++    tb_logger = TensorBoardLogger("hwr_final")
++
++    ##  Intialize LearningRate callback
++    lr_monitor = LearningRateMonitor(logging_interval='epoch')
++
++
++    checkpoint_mcallback = ModelCheckpoint(
++        monitor='val_loss_epoch',
++        mode='min',
++        save_last=True,
++    )
++
++    metrics = {"loss": "val_loss_epoch"}
++   
++    if args.resume_from:
++      trainer = pl.Trainer(resume_from_checkpoint=args.checkpoint,gpus=args.gpus,
++                         deterministic=True,
++                         max_epochs=args.epochs,
++                         logger=tb_logger,
++                         callbacks=[lr_monitor],
++                         checkpoint_callback=checkpoint_mcallback)
++    else:
++      trainer = pl.Trainer(gpus=args.gpus,
++                           deterministic=True,
++                           max_epochs=args.epochs,
++                           logger=tb_logger,
++                           callbacks=[lr_monitor],
++                           checkpoint_callback=checkpoint_mcallback)
++
++
++    ## Training mode
++    trainer.fit(classifier, train_dataloader, val_dataloader)
++    trainer.test(classifier, test_dataloader)
++    return predicts_test, probabilities_test
+diff --git a/src/network/model.py b/src/network/model.py
+index f36994e..4ea4679 100644
+--- a/src/network/model.py
++++ b/src/network/model.py
+@@ -154,7 +154,7 @@ class HTRModel:
+ 
+         # create and compile
+         self.model = Model(inputs=inputs, outputs=outputs)
+-        self.model.compile(optimizer=optimizer, loss=self.ctc_loss_lambda_func)
++        self.model.compile(optimizer=optimizer, loss=self.ctc_loss_lambda_func,run_eagerly=True)
+ 
+     def fit(self,
+             x=None,
+@@ -227,6 +227,8 @@ class HTRModel:
+                                  callbacks=callbacks, max_queue_size=max_queue_size,
+                                  workers=workers, use_multiprocessing=use_multiprocessing)
+ 
++        #print("out shape is",out.shape)
++
+         if not ctc_decode:
+             return np.log(out.clip(min=1e-8)), []
+ 
+@@ -238,6 +240,9 @@ class HTRModel:
+         batch_size = int(np.ceil(len(out) / steps))
+         input_length = len(max(out, key=len))
+ 
++        #print("batch size is", batch_size)
++        #print("input_length is",input_length)
++
+         predicts, probabilities = [], []
+ 
+         while steps_done < steps:
+@@ -245,30 +250,43 @@ class HTRModel:
+             until = index + batch_size
+ 
+             x_test = np.asarray(out[index:until])
++            #print("shape of x_test is",x_test.shape)
+             x_test_len = np.asarray([input_length for _ in range(len(x_test))])
+-
++            #print("**********************x_test_len shape**************************",x_test_len.shape)
+             decode, log = K.ctc_decode(x_test,
+                                        x_test_len,
+                                        greedy=self.greedy,
+                                        beam_width=self.beam_width,
+                                        top_paths=self.top_paths)
++            #print("decode is",decode)
++            #print("decode shape is", len(decode))
+ 
+             probabilities.extend([np.exp(x) for x in log])
+             decode = [[[int(p) for p in x if p != -1] for x in y] for y in decode]
++            #print("decode shape is after processing", len(decode))
+             predicts.extend(np.swapaxes(decode, 0, 1))
++            #print("predicts shape and element of predict shape",len(predicts),predicts[0].shape)
+ 
+             steps_done += 1
+             if verbose == 1:
+                 progbar.update(steps_done)
++            print("final predicts",len(predicts))
++            print("final probabilties",len(probabilities))
+ 
+         return (predicts, probabilities)
+ 
+     @staticmethod
+     def ctc_loss_lambda_func(y_true, y_pred):
+         """Function for computing the CTC loss"""
++        #print("y_true is",y_true)
++        #print("y_true shape is",y_true.shape)
++
+ 
+         if len(y_true.shape) > 2:
+             y_true = tf.squeeze(y_true)
++ 
++        #print("y_pred is",y_pred)
++        #print("y_pred shape is",y_pred.shape)
+ 
+         # y_pred.shape = (batch_size, string_length, alphabet_size_1_hot_encoded)
+         # output of every model is softmax
+@@ -277,10 +295,14 @@ class HTRModel:
+         input_length = tf.math.reduce_sum(y_pred, axis=-1, keepdims=False)
+         input_length = tf.math.reduce_sum(input_length, axis=-1, keepdims=True)
+ 
++        #print("input length is",input_length)
++
+         # y_true strings are padded with 0
+         # so sum of non-zero gives number of characters in this string
+         label_length = tf.math.count_nonzero(y_true, axis=-1, keepdims=True, dtype="int64")
+ 
++        #print("label length is",label_length)
++
+         loss = K.ctc_batch_cost(y_true, y_pred, input_length, label_length)
+ 
+         # average loss across all entries in the batch
+diff --git a/src/pytorch_test.py b/src/pytorch_test.py
+new file mode 100644
+index 0000000..81cecbd
+--- /dev/null
++++ b/src/pytorch_test.py
+@@ -0,0 +1,299 @@
++"""
++Provides options via the command line to perform project tasks.
++* `--source`: dataset/model name (bentham, iam, rimes, saintgall, washington)
++* `--arch`: network to be used (puigcerver, bluche, flor)
++* `--transform`: transform dataset to the HDF5 file
++* `--cv2`: visualize sample from transformed dataset
++* `--kaldi_assets`: save all assets for use with kaldi
++* `--image`: predict a single image with the source parameter
++* `--train`: train model with the source argument
++* `--test`: evaluate and predict model with the source argument
++* `--norm_accentuation`: discard accentuation marks in the evaluation
++* `--norm_punctuation`: discard punctuation marks in the evaluation
++* `--epochs`: number of epochs
++* `--batch_size`: number of batches
++"""
++import argparse
++import cv2
++import h5py
++import os
++import sys
++import string
++import datetime
++import time
++from data import preproc as pp, evaluation
++from data.generator import DataGenerator, Tokenizer
++from data.reader import Dataset
++from network.model import HTRModel
++from model_torch import train_model
++from dataloader import get_dataloaders
++from argparse import ArgumentParser
++
++import torch
++from torch import nn
++import numpy as np
++from tensorflow.keras import backend as K
++
++class Puigcerver_torch(nn.Module):
++    def __init__(self, batch_size):
++        super(Puigcerver_torch, self).__init__()
++
++        ### Training Hyperparams
++        self.learning_rate = None
++        self.optimizer = None
++        self.batch_size = batch_size
++        self.criterion = nn.CTCLoss(blank=0, reduction='mean')
++
++        ### Conv Layers
++        inputs = np.full((batch_size), 128, dtype=np.int32)
++        self.input_lengths = torch.as_tensor(inputs)
++        self.conv_l1 = nn.Conv2d(in_channels=1,
++                                 out_channels=16,
++                                 kernel_size=(3, 3),
++                                 stride=(1, 1),
++                                 padding=1)
++        self.bn_l1 = nn.BatchNorm2d(16)
++
++        self.conv_l2 = nn.Conv2d(in_channels=16,
++                                 out_channels=32,
++                                 kernel_size=(3, 3),
++                                 stride=(1, 1),
++                                 padding=1)
++        self.bn_l2 = nn.BatchNorm2d(32)
++
++        self.conv_l3 = nn.Conv2d(in_channels=32,
++                                 out_channels=48,
++                                 kernel_size=(3, 3),
++                                 stride=(1, 1),
++                                 padding=1)
++        self.bn_l3 = nn.BatchNorm2d(48)
++
++        self.conv_l4 = nn.Conv2d(in_channels=48,
++                                 out_channels=64,
++                                 kernel_size=(3, 3),
++                                 stride=(1, 1),
++                                 padding=1)
++        self.bn_l4 = nn.BatchNorm2d(64)
++
++        self.conv_l5 = nn.Conv2d(in_channels=64,
++                                 out_channels=80,
++                                 kernel_size=(3, 3),
++                                 stride=(1, 1),
++                                 padding=1)
++        self.bn_l5 = nn.BatchNorm2d(80)
++
++        self.leakyRelu = torch.nn.LeakyReLU(negative_slope=0.01)
++        self.pool = torch.nn.MaxPool2d(kernel_size=(2, 2),
++                                       stride=(2, 2),
++                                       padding=0)
++        self.dropout = torch.nn.Dropout(p=0.2)
++
++        # LSTM layers
++        self.lstm_l1 = torch.nn.LSTM(input_size=1280,
++                                     hidden_size=256,
++                                     batch_first=True,
++                                     bidirectional=True,
++                                     dropout=0.5,
++                                     num_layers=5)
++
++        self.linear = torch.nn.Linear(512, 98)
++        self.softmax = torch.nn.Softmax(dim=2)
++
++    def forward(self, x):
++
++        ## Conv Layers
++        x = self.conv_l1(x)
++        x = self.bn_l1(x)
++        x = self.leakyRelu(x)
++        x = self.pool(x)
++
++        x = self.conv_l2(x)
++        x = self.bn_l2(x)
++        x = self.leakyRelu(x)
++        x = self.pool(x)
++
++        x = self.dropout(x)
++        x = self.conv_l3(x)
++        x = self.bn_l3(x)
++        x = self.leakyRelu(x)
++        x = self.pool(x)
++
++        x = self.dropout(x)
++        x = self.conv_l4(x)
++        x = self.bn_l4(x)
++        x = self.leakyRelu(x)
++
++        x = self.dropout(x)
++        x = self.conv_l5(x)
++        x = self.bn_l5(x)
++        x = self.leakyRelu(x)
++
++        ## LSTM
++        x = torch.transpose(x, 1, 2).reshape(self.batch_size, 128, 1280)
++        x, (hn, cn) = self.lstm_l1(x)
++        x = self.linear(x)
++        x = torch.nn.functional.log_softmax(x, dim=2)
++        x = torch.transpose(x, 0, 1)
++        return x
++
++
++def convert_torchscript(classifier : nn.Module):
++    script_model = torch.jit.script(classifier)
++    freeze_model = torch.jit.freeze(script_model.eval())
++    print("\nTorchScript Model(frozen):\n")
++    # print(freeze_model.graph)
++
++    print("Saving pytorch model...\n")
++    torch.save(classifier.state_dict(), "hwr_pytorch.pt")
++
++    print("Saving torchscript model(frozen)...\n")
++    torch.jit.save(freeze_model, "hwr_torchscript.torch")
++
++
++if __name__ == "__main__":
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--source", type=str, required=True)
++    parser.add_argument("--arch", type=str, default="flor")
++
++    parser.add_argument("--transform", action="store_true", default=False)
++    parser.add_argument("--cv2", action="store_true", default=False)
++    parser.add_argument("--image", type=str, default="")
++    parser.add_argument("--kaldi_assets", action="store_true", default=False)
++
++    parser.add_argument("--train", action="store_true", default=False)
++    parser.add_argument("--test", action="store_true", default=False)
++
++    parser.add_argument("--resume_from", action="store_true", default=False)
++    parser.add_argument("--checkpoint", type=str, required=False)
++    parser.add_argument("--norm_accentuation",
++                        action="store_true",
++                        default=False)
++    parser.add_argument("--norm_punctuation",
++                        action="store_true",
++                        default=False)
++
++    parser.add_argument("--epochs", type=int, default=100)
++    parser.add_argument("--batch_size", type=int, default=1)
++    parser.add_argument('--gpus', default=None)
++    parser.add_argument('--precision', default='FP32', choices=['FP32', 'FP16'])
++    parser.add_argument('--accuracy', action="store_true", help="enable accuracy pass")
++    parser.add_argument('--backend', default='pytorch', choices=['pytorch', 'NNCompiler'])
++    parser.add_argument('--model_file', default=None, help='path to hwr graph file (torchscript graph, required by NNCompiler')
++    args = parser.parse_args()
++
++    source_path = os.path.join(f"{args.source}.hdf5")
++    max_text_length = 128
++    charset_base = string.printable[:95]
++
++    classifier = None
++    if args.precision == 'FP32':
++        classifier = Puigcerver_torch(args.batch_size)
++    elif args.precision == 'FP16':
++        classifier = Puigcerver_torch(args.batch_size).half()
++    
++    state_dict = torch.load(args.checkpoint)["state_dict"]
++    classifier.load_state_dict(state_dict)
++    if args.gpus:
++        classifier = classifier.cuda()
++    classifier = classifier.eval()
++
++    if args.backend == 'NNCompiler':
++        model_file = args.model_file
++        if model_file is None:
++            convert_torchscript(classifier)
++            model_file = "./hwr_torchscript.torch"
++        sys.path.append('/opt/rocm/lib')
++        import NNCompiler
++        assert os.path.isfile(model_file)
++        classifier = NNCompiler.PipelineManager(model_file, 'HWR')
++
++    print("Preparing dataloader...")
++    _, _, test_dataloader = get_dataloaders(args)
++    predicts_test = []
++    if not args.accuracy:
++        total_time = 0
++        total_cnt = 0
++    warn_up = True
++    with torch.no_grad():
++        print("Testing... precision: {} backend: {} BatchSize: {}".format(args.precision, args.backend, args.batch_size))
++        
++        for i, batch in enumerate(test_dataloader, 0):
++            print("Batch[{}]".format(i))
++            x, y = batch
++            if(args.gpus):
++                x = x.cuda()
++            x = x.half() if args.precision == 'FP16' else x
++            # For warn-up
++            if warn_up:
++                for _ in range(3):
++                    if args.backend == 'pytorch':
++                        _ = classifier(x)
++                    elif args.backend == 'NNCompiler':
++                        _ = classifier.inferenceModel([x])
++                warn_up = False
++            # Get inference time
++            torch.cuda.synchronize()
++            start_time = time.time()
++            if args.backend == 'pytorch':
++                y_hat = classifier(x)
++            else:
++                y_hat = classifier.inferenceModel([x])[0]
++            torch.cuda.synchronize()
++            end_time = time.time()
++            if not args.accuracy:
++                total_time += end_time - start_time
++                total_cnt += 1
++                print('time:{} ms'.format(1000*(end_time - start_time)))
++
++            y_pred = torch.exp(y_hat)
++            y_pred = torch.transpose(y_pred, 0, 1)
++            y_pred = y_pred.cpu().detach().numpy()
++            # tensorflow ctc_decode don't support half, need top convert to FP32
++            y_pred = y_pred.astype(np.float) if args.precision == 'FP16' else y_pred
++            input_length = 128
++            y_test_len = np.asarray([input_length for _ in range(len(y_pred))])
++
++            if args.accuracy:
++                decode, log = K.ctc_decode(y_pred,
++                                        y_test_len,
++                                        greedy=False,
++                                        beam_width=60,
++                                        top_paths=1)
++
++                decode = [[[int(p) for p in x if p != -1] for x in y] for y in decode]
++                predicts_test.extend(np.swapaxes(decode, 0, 1))
++
++    print('*' * 20 + 'Summary' + '*' * 20)
++    print("Precision: {}\nBackend: {}\nBatchSize: {}\n".format(args.precision, args.backend, args.batch_size))
++    print('testMode: {}'.format('Accuracy' if args.accuracy else 'Performance'))
++    if args.accuracy:
++        dtgen = DataGenerator(source=source_path,
++                                batch_size=args.batch_size,
++                                charset=charset_base,
++                                max_text_length=max_text_length,
++                                predict=(not args.kaldi_assets) and args.test)
++        predicts_test = [dtgen.tokenizer.decode(x[0]) for x in predicts_test]
++        ground_truth_test = [x.decode() for x in dtgen.dataset['test']['gt']]
++        ground_truth_test = ground_truth_test[0:len(predicts_test)]
++
++        evaluate_test = evaluation.ocr_metrics(
++            predicts=predicts_test,
++            ground_truth=ground_truth_test,
++            norm_accentuation=args.norm_accentuation,
++            norm_punctuation=args.norm_punctuation)
++
++        e_corpus = "\n".join([
++            f"Total test images:    {dtgen.size['test']}", f"Metrics:",
++            f"Character Error Rate: {evaluate_test[0]:.8f}",
++            f"Word Error Rate:      {evaluate_test[1]:.8f}",
++            f"Sequence Error Rate:  {evaluate_test[2]:.8f}"
++        ])
++
++        sufix = ("_norm" if args.norm_accentuation or args.norm_punctuation else "") + \
++                ("_accentuation" if args.norm_accentuation else "") + \
++                ("_punctuation" if args.norm_punctuation else "")
++
++        print(e_corpus)
++        print(sufix)
++    else:
++        print('Performance: {}ms'.format(total_time / total_cnt * 1000))
+diff --git a/src/run_eval.sh b/src/run_eval.sh
+new file mode 100755
+index 0000000..78190c6
+--- /dev/null
++++ b/src/run_eval.sh
+@@ -0,0 +1,16 @@
++#!/bin/bash
++# Ref: https://wiki.itplatform.samsungds.net:8090/display/SRCXAIG/How+to+create+TV+for+RNNT+%2C+HWR+and+GNMT
++
++python3 pytorch_test.py \
++    --arch=puigcerver \
++    --source=iam \
++    --test \
++    --batch_size=1 \
++    --epochs=100 \
++    --gpus 1 \
++    --resume_from \
++    --checkpoint=last.ckpt \
++    --precision=FP16 \
++    --backend=NNCompiler \
++    --accuracy # if enable, get the accuracy, otherwise get the performance
++    # --model_file= path_to_model/hwr.torchscript 
+-- 
+2.17.1
+

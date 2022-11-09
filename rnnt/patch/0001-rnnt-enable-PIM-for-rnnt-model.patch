@@ -1,0 +1,1025 @@
+From 0d64f545276d8c6ebb9ef953f6c685efcd68a193 Mon Sep 17 00:00:00 2001
+From: y123-li <y123.li@samsung.com>
+Date: Mon, 11 Jan 2021 09:08:15 -0500
+Subject: [PATCH] rnnt: enable PIM for rnnt model
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+1. SRCX modify rnnt to use GPU
+ - Add support for FP16 inference for RNNT on GPU
+ - Add RNNT profile
+2. Test RNNT inference w/FP16
+ - Test FP16 Inference
+ - Update README.md
+ - Fix README.md
+3. Add rnnt-fp16 per sample evaluation
+ - print sample prediction and labels,and this sample accuracy
+4. Update RNNT print during evaluation
+ - remove useless infor
+ - add sample cnt infor
+5. Make rnnt run scripts
+ - add rnnt script for accuracy check
+ - add rnnt script for performance check
+6. Add per sample inference time inforation.
+7. Remove time duration log
+8. feat: 🎸 Add NNRuntime to RNNT for compare
+ - Integrate NNRuntime into RNNT
+ - Enable NNRuntime acc & performance test
+9. feat: 🎸 Run RNNT in NNRuntime with all samples
+10. feat: 🎸 Add extra pip package when runing RNNT
+11. Add flag for print WER_PER_SAMPLE
+12. feat: 🎸 Support compile_level for RNNT of backend=NNRuntime
+ - Currently, GraphGen is build and install as a extern tools,
+   it is linked by NNCompiler, so we do not need to call GraphGen directly to gnerate IR file.
+ - Instead, we can test NNCompiler/NNRuntime end-to-end, by set compile_level=0 and set model_file=torchscript
+13. feat: 🎸 Add pim init and deinit for rnnt
+ - Add pim init and deinit for rnnt in run.py
+14. feat: 🎸 Change model_file arg optional when compile_level is 0
+ - Change model_file arg optional when compile_level is 0. If model_file is
+   not given, the torchscript model file will be dumped.
+15. feat: 🎸 Add warm-up for rnnt
+ - Add warm-up for rnnt in pytorch_SUT.py
+16. adapt NNCompiler python api for rnnt model
+
+Contributors:
+ penghui.wei <penghui.wei@samsung.com>
+ yao01.xiao <yao01.xiao@samsung.com>
+ hao11.wang <hao11.wang@samsung.com>
+ Hyeonsu Kim <hyeonsu.kim@samsung.com>
+ jie01.wu <jie01.wu@samsung.com>
+---
+ .gitignore                                    |  16 ++
+ .gitmodules                                   |  15 +-
+ README.md                                     | 143 ++++++----
+ docker-fim.sh                                 |  37 +++
+ loadgen/version_generator.pyc                 | Bin 0 -> 4662 bytes
+ speech_recognition/rnnt/eval_accuracy.sh      |  34 +++
+ speech_recognition/rnnt/eval_performance.sh   |  32 +++
+ speech_recognition/rnnt/pytorch/decoders.py   |   2 +-
+ .../rnnt/pytorch/model_separable_rnnt.py      |   3 +
+ speech_recognition/rnnt/pytorch/tv_utils.py   |  11 +
+ speech_recognition/rnnt/pytorch_SUT.py        | 256 +++++++++++++++++-
+ speech_recognition/rnnt/run.py                |  19 +-
+ speech_recognition/rnnt/run_simple.sh         |  39 +++
+ speech_recognition/rnnt/run_srcx.sh           |  77 ++++++
+ 14 files changed, 610 insertions(+), 74 deletions(-)
+ create mode 100755 docker-fim.sh
+ create mode 100644 loadgen/version_generator.pyc
+ create mode 100755 speech_recognition/rnnt/eval_accuracy.sh
+ create mode 100755 speech_recognition/rnnt/eval_performance.sh
+ create mode 100644 speech_recognition/rnnt/pytorch/tv_utils.py
+ create mode 100755 speech_recognition/rnnt/run_simple.sh
+ create mode 100755 speech_recognition/rnnt/run_srcx.sh
+
+diff --git a/.gitignore b/.gitignore
+index 9545a79..aea0e40 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,4 +1,20 @@
+ loadgen/build/
++loadgen/dist/
++loadgen/mlperf_loadgen.egg-info/
+ libmlperf_loadgen.a
+ __pycache__/
+ generated/
++
++
++speech_recognition/rnnt/local_data
++speech_recognition/rnnt/profile*
++speech_recognition/rnnt/*.pth
++speech_recognition/rnnt/*.pt
++speech_recognition/rnnt/run_logs/
++speech_recognition/rnnt/dnn_model_analyzer/
++
++.vscode
++speech_recognition/rnnt/Offline_pytorch_accuracyrerun/
++speech_recognition/rnnt/third_party/
++
++*.pyc
+diff --git a/.gitmodules b/.gitmodules
+index 246722f..88e0172 100644
+--- a/.gitmodules
++++ b/.gitmodules
+@@ -1,19 +1,8 @@
+-[submodule "build"]
+-	path = build
+-	url = https://chromium.googlesource.com/chromium/src/build
+-	branch = master
++
+ [submodule "third_party/ninja"]
+ 	path = third_party/ninja
+ 	url = https://github.com/ninja-build/ninja.git
+ [submodule "third_party/pybind"]
+ 	path = third_party/pybind
+ 	url = https://github.com/pybind/pybind11.git
+-[submodule "third_party/gn"]
+-	path = third_party/gn
+-	url = https://gn.googlesource.com/gn
+-[submodule "language/bert/DeepLearningExamples"]
+-	path = language/bert/DeepLearningExamples
+-	url = https://github.com/NVIDIA/DeepLearningExamples.git
+-[submodule "vision/medical_imaging/3d-unet/nnUnet"]
+-	path = vision/medical_imaging/3d-unet/nnUnet
+-	url = https://github.com/MIC-DKFZ/nnUNet.git
++
+diff --git a/README.md b/README.md
+index ca7f65a..b8866c0 100644
+--- a/README.md
++++ b/README.md
+@@ -1,61 +1,112 @@
+-# MLPerf Inference Benchmark Suite
+-MLPerf Inference is a benchmark suite for measuring how fast systems can run models in a variety of deployment scenarios. 
++# MLPerf RNNT Inference w/FP16
+ 
+-Please see the [MLPerf Inference benchmark paper](https://arxiv.org/abs/1911.02549) for a detailed description of the benchmarks along with the motivation and guiding principles behind the benchmark suite. If you use any part of this benchmark (e.g., reference implementations, submissions, etc.), please cite the following:
++## 1. Downlaod  MLPerf Inference
++```
++git clone https://github.sec.samsung.net/FIM/MLPerf_inference.git
++
++# download submodules
++git submodule init
++git submodule update
++
++# Switch RNNT FP16 test branch
++git checkout rnnt_fp16_test
++```
++
++## 2. Prepare Datasets and Weights
++The datasets and weights files are save on SAIT Server:75.12.84.57, the files can be reused directly
++
++* Datasets: /data/SRCXFIM/RNNT_Inference/Datasets/local_data
++* Weights: /data/SRCXFIM/RNNT_Inference/Weights/rnnt.pt
++
++## 3. Inference with Docker
++### Start Docker
++* Docker image: fim-rocm4.0:pytorch-1.7
++* Docker launch script: https://github.sec.samsung.net/FIM/FIMLibrary/blob/develop/docker/docker-fim.sh
++
++* Docker usage:
++    ```
++    ./docker-fim.sh fim-rocm4.0:pytorch-1.7 <directory>
++    ```
++
++    **Option**: If need to run RNNT with **NNRuntime**, use this docker image: `pim-rocm4.0:tf2.3-dev` 
++    
++Map the datasets and weights into docker, add this to docker-fim.sh:
++
++```
++-v /data/SRCXFIM/RNNT_Inference/Datasets/local_data:/data/SRCXFIM/RNNT_Inference/Datasets/local_data \
++-v /data/SRCXFIM/RNNT_Inference/Weights/rnnt.pt:/data/SRCXFIM/RNNT_Inference/Weights/rnnt.pt \
++
++```
+ 
++
++### Config MLPerf
++1. Build and Install `loadgen`: refer MLPer_inference/loadgen/README_BUILD.md
+ ```
+-@misc{reddi2019mlperf,
+-    title={MLPerf Inference Benchmark},
+-    author={Vijay Janapa Reddi and Christine Cheng and David Kanter and Peter Mattson and Guenther Schmuelling and Carole-Jean Wu and Brian Anderson and Maximilien Breughe and Mark Charlebois and William Chou and Ramesh Chukka and Cody Coleman and Sam Davis and Pan Deng and Greg Diamos and Jared Duke and Dave Fick and J. Scott Gardner and Itay Hubara and Sachin Idgunji and Thomas B. Jablin and Jeff Jiao and Tom St. John and Pankaj Kanwar and David Lee and Jeffery Liao and Anton Lokhmotov and Francisco Massa and Peng Meng and Paulius Micikevicius and Colin Osborne and Gennady Pekhimenko and Arun Tejusve Raghunath Rajan and Dilip Sequeira and Ashish Sirasao and Fei Sun and Hanlin Tang and Michael Thomson and Frank Wei and Ephrem Wu and Lingjie Xu and Koichi Yamada and Bing Yu and George Yuan and Aaron Zhong and Peizhao Zhang and Yuchen Zhou},
+-    year={2019},
+-    eprint={1911.02549},
+-    archivePrefix={arXiv},
+-    primaryClass={cs.LG}
+-}
++# Install absl & numpy & other packages
++pip3 install absl-py numpy unidecode inflect tqdm toml librosa
++
++# Install PyTorch, if test RNNT with `NNRuntime` backend, install prebuild Pytorch, here provided a PyTorch1.7 build with rocm-4.0
++/data/SRCXFIM/Softwares/torch-1.7.0a0-cp36-cp36m-linux_x86_64.whl  (SAIT: 57 server)
++
++# Generate *.whl file
++CFLAGS="-std=c++14 -O3" python setup.py bdist_wheel
++
++# Then will generate *.whl package, install it
++cd loadgen/dist
++pip3 install mlperf_loadgen-linux_x86_64.whl
++
+ ```
+ 
+-## MLPerf Inference master
++2. Link Datasets and Weights files
+ 
+-The master of this repository contains ***work in progress*** for the next official release. 
++```
++# datasets
++cd MLPerf_Inference/speech_recognition/rnnt
++ln -s /data/SRCXFIM/RNNT_Inference/Datasets/local_data local_data
+ 
+-The list of models for the next official releases (***> 0.7***) is not finalized at this point.
++# weights
++ln -s /data/SRCXFIM/RNNT_Inference/Weights/rnnt.pt rnnt.pt
+ 
+-See the individual Readme files in the reference app for details.
++```
+ 
+-| model | reference app | framework | dataset |
+-| ---- | ---- | ---- | ---- |
+-| resnet50-v1.5 | [vision/classification_and_detection](vision/classification_and_detection) | tensorflow, pytorch, onnx | imagenet2012 |
+-| ssd-mobilenet 300x300 | [vision/classification_and_detection](vision/classification_and_detection) | tensorflow, pytorch, onnx| coco resized to 300x300 | 
+-| ssd-resnet34 1200x1200 | [vision/classification_and_detection](vision/classification_and_detection) | tensorflow, pytorch, onnx | coco resized to 1200x1200|
+-| bert | [language/bert](language/bert) | tensorflow, pytorch, onnx | squad-1.1 |
+-| dlrm | [recommendation/dlrm](recommendation/dlrm/pytorch) | pytorch, tensorflow(?), onnx(?) | Criteo Terabyte |
+-| 3d-unet | [vision/medical_imageing/3d-unet](vision/medical_imaging/3d-unet) | pytorch, tensorflow(?), onnx(?) | BraTS 2019 |
+-| rnnt | [speech_recognition/rnnt](speech_recognition/rnnt) | pytorch | OpenSLR LibriSpeech Corpus |
++### Run Inference Test
++* we offer the run script: `run_simple.sh`
++* modify the `log_dir` to save log files
+ 
+-## MLPerf Inference v0.7 (submission 9/18/2020)
+-Use the r0.7 branch (```git checkout r0.7```) if you want to submit or reproduce v0.7 results.
++For Latency test, remove `--accruacy`
+ 
+-See the individual Readme files in the reference app for details.
++#### Run with PyTorch backend
++```
++# Run with PyTorch
++python3 run.py --dataset_dir $local_data_dir \
++         --manifest $local_data_dir/dev-clean-wav.json \
++         --pytorch_config_toml pytorch/configs/rnnt.toml \
++         --pytorch_checkpoint $work_dir/rnnt.pt \
++         --scenario ${scenario} \
++         --backend pytorch \
++         --log_dir ${log_dir} \
++         --accuracy
++```
++
++#### Run with NNRuntime backend
++Please build and install NNRuntime first:https://github.sec.samsung.net/PIM/NNCompiler/blob/develop/README.md
+ 
+-| model | reference app | framework | dataset |
+-| ---- | ---- | ---- | ---- |
+-| resnet50-v1.5 | [vision/classification_and_detection](https://github.com/mlperf/inference/tree/r0.7/vision/classification_and_detection) | tensorflow, pytorch, onnx | imagenet2012 |
+-| ssd-mobilenet 300x300 | [vision/classification_and_detection](https://github.com/mlperf/inference/tree/r0.7/vision/classification_and_detection) | tensorflow, pytorch, onnx| coco resized to 300x300 | 
+-| ssd-resnet34 1200x1200 | [vision/classification_and_detection](https://github.com/mlperf/inference/tree/r0.7/vision/classification_and_detection) | tensorflow, pytorch, onnx | coco resized to 1200x1200|
+-| bert | [language/bert](https://github.com/mlperf/inference/tree/r0.7/language/bert) | tensorflow, pytorch, onnx | squad-1.1 |
+-| dlrm | [recommendation/dlrm](https://github.com/mlperf/inference/tree/r0.7/recommendation/dlrm/pytorch) | pytorch, tensorflow(?), onnx(?) | Criteo Terabyte |
+-| 3d-unet | [vision/medical_imageing/3d-unet](https://github.com/mlperf/inference/tree/r0.7/vision/medical_imaging/3d-unet) | pytorch, tensorflow(?), onnx(?) | BraTS 2019 |
+-| rnnt | [speech_recognition/rnnt](https://github.com/mlperf/inference/tree/r0.7/speech_recognition/rnnt) | pytorch | OpenSLR LibriSpeech Corpus |
+ 
+-## MLPerf Inference v0.5
+-Use the r0.5 branch (```git checkout r0.5```) if you want to reproduce v0.5 results.
++set ENV `export ME_PASS_CONFIG_PATH=path/to/your/pass_config.json` , this JSON file provided here:https://github.sec.samsung.net/PIM/NNCompiler/blob/develop/compiler/include/middlend/passes/pass_config.json
+ 
+-See the individual Readme files in the reference app for details.
++Reference: https://github.sec.samsung.net/PIM/NNCompiler/blob/develop/examples/runtime/README.md
++```
++python3 run.py --dataset_dir $local_data_dir \
++        --manifest $local_data_dir/dev-clean-wav.json \
++        --pytorch_config_toml pytorch/configs/rnnt.toml \
++        --pytorch_checkpoint $work_dir/rnnt.pt \
++        --scenario ${scenario} \
++        --backend NNRuntime \
++        --log_dir ${log_dir} \
++        --accuracy \
++        --model_file /path/to/graph_ir or torchscript file \
++        --compile_level 0 or 1    # if compile_level=0,  the model_file is torchscript formate, if compile_level=1, the model_file is GraphIR formate
++        # --enable_compare   # enable this will run RNNT both on PyTorch & NNRuntime, then compare the results
++
++```
+ 
+-| model | reference app | framework | dataset |
+-| ---- | ---- | ---- | ---- |
+-| resnet50-v1.5 | [v0.5/classification_and_detection](https://github.com/mlperf/inference/tree/r0.5/v0.5/classification_and_detection) | tensorflow, pytorch, onnx | imagenet2012 |
+-| mobilenet-v1 | [v0.5/classification_and_detection](https://github.com/mlperf/inference/tree/r0.5/v0.5/classification_and_detection) |tensorflow, pytorch, onnx | imagenet2012 |
+-| ssd-mobilenet 300x300 | [v0.5/classification_and_detection](https://github.com/mlperf/inference/tree/r0.5/v0.5/classification_and_detection) |tensorflow, pytorch, onnx | coco resized to 300x300 |
+-| ssd-resnet34 1200x1200 | [v0.5/classification_and_detection](https://github.com/mlperf/inference/tree/r0.5/v0.5/classification_and_detection) | tensorflow, pytorch, onnx | coco resized to 1200x1200 |
+-| gnmt | [v0.5/translation/gnmt/](https://github.com/mlperf/inference/tree/r0.5/translation/gnmt/tensorflow) | tensorflow, pytorch | See Readme |
+diff --git a/docker-fim.sh b/docker-fim.sh
+new file mode 100755
+index 0000000..8ca9c4a
+--- /dev/null
++++ b/docker-fim.sh
+@@ -0,0 +1,37 @@
++#!/usr/bin/env bash
++
++# https://github.sec.samsung.net/FIM/MLPerf_inference_results/tree/master/closed/results/AMD
++
++image_name=$1
++# container_name=fim-${image_name//[:\/]/-}-$(id -u -n $USER)
++container_name=mlperf_inference_rnnt_fp16
++WORKSPACE=$HOME/$2
++
++docker ps -a | grep ${container_name} > /dev/null 2>&1
++result=$?
++
++if [ ! $result -eq 0 ]; then
++    echo "No Container found, Create new containter ${container_name}"
++
++    mkdir -p $WORKSPACE
++
++    # Start docker images (only once)
++      docker run -it --user root --network=host --device=/dev/kfd --device=/dev/dri --group-add video --ipc=host --shm-size 16G \
++                 -e LOCAL_USER_ID=`id -u $USER` \
++                 --security-opt seccomp:unconfined \
++                 --cap-add=ALL --privileged \
++                 -e DISPLAY=$DISPLAY \
++                 -p 8080:8080 \
++                 --dns 10.41.128.98 \
++                 -v /dev:/dev \
++                 -v /lib/modules:/lib/modules \
++                 -v $HOME/.ssh:/home/user/.ssh \
++                 -v /tmp/.X11-unix:/tmp/.X11-unix \
++                 -v /root/.Xauthority:/root/.Xauthority:rw \
++		 -v /lib/modules:/lib/modules \
++		 -v $WORKSPACE:/home/user/fim-workspace \
++		 --name=${container_name} \
++                 $image_name /bin/bash
++else
++    docker start  ${container_name} && docker attach ${container_name}
++fi
+diff --git a/loadgen/version_generator.pyc b/loadgen/version_generator.pyc
+new file mode 100644
+index 0000000000000000000000000000000000000000..b0cb8a59586b1f35edc6c4806163988b8a4796c1
+GIT binary patch
+literal 4662
+zcmcgvYi}F573E0sL*qxh$tG&H$YP@1v`Pa>4bT_Tc+qU^x@lay7$=*Bfp$8cq3w~S
+z8D&V>32J}Y^h<w3(e^j=w-spntv%;bvXuw+n`>DV$$NQ89^QL+S^ejd|JQ&0`wxj4
+z|5fn&3w+JrQKb0yR9~sx^SY;Yy-9yX?N%oBs@kney`uUxHJDMmGs;V=>Q5LvtJ0cO
+z=2SW(m3fuUN~NySIjQ(6otMgjO6yWtRC-CJzB;O?@-IrysNS;Di|UQ1yj<3`(^|k9
+zv;X36tL33;t0>~(Fkyom;rB7VrilVOIm6N`>eN#WtgLaW@LR(#+cT=M)0&0amaU`Q
+z-1urE3U@Zw3~hu>OOq`r?;6&dEflInsZ48ZDFaj8&j#A+(#ff0LKNM@VxYStqs#6v
+z8?;Y~^2iM1M0dkcZZV>r>f`QjHh-(j{V2=#b*Xa*`$e1{=)8NZOOq9Ogt{(cTa=yQ
+zYkLJ|2l0`P%J?M0{8@f*i__ImC~wwFxVXtzU<l9w7-Zv>F$ml|Kp+4(6M!%Wr7iOb
+z%B0AR4UA16JaFc}7i_u(nHh*%cY{Cr<~C{plwzAD!FwYhD1+5NQ2e=XmPNVLc2wpR
+zp^ImB=KE7{a{YM>5P2MK;>!nf9&_!F@+3<2KDXphtbW&_$dwQmLGeGRSfzRZ68;4I
+z;F7(HdV_sbrUU@^LQtI&!1XQ!wJ8CP;X*LOW9ngCjX{H>IYq1?facY0IjA?75utFQ
+zgiwMKg7Djvd}U!6CY=&2yk}=YR50bcDqw@1)*?2)Wp1J@^>KR`mqrKewmB?HyL$hJ
+z!LQaIt(gX-{o(-q`$aj3?P~K*@}wEG^WeUC0G(xIf;Rp~d0}|CPJIZ^u&-B(96^-B
+zE(ZJrR`LSTkrZ%zZ5i?#nGN-E#)xpSn4!}Vfn9R)$Hicf*)@(}IAg?)Oe#Kw)@E@a
+z(QX+Zg#jo^4U3`90XMf6r_yy&W>$x^5Yh$Q5b75DS>G+@AhS_|+2TC4bP=`zjYQ`}
+zhOU%L@yBupz_~g$fB6p18OHRXqcN{U6JCMSXL)7`XoN-o0J`QX3gz9D&#ZUNyMxbX
+zUPAICXv9gvVGk9@t@K5N#)M?2Jj?Y~88Gkl);`z^FFn^4#}jUrsBCUMYKDX|q%(x{
+z$dJb_WE_6PCQr;YxeGbuJidI4yO`{Q7!z4C%QVQK?9rb28HN~chKzkfJ_+HS$M>9Z
+zZUA&bTu}$p)Z-Xt?RP8c3}Fv+!7RV8sF$C-t>$QDq6T2cYL8T7+8nrGq9Z&arnG9D
+z)zqsYF$8Uh&Yn7x(>cYJaW*UbRaHG4<1FRoAL`|w6>ew}4Q~E9o_G%;(Bm9Q3~t|>
+zSEuL)ZPwWjPHWH@F8;<(u}O@7L0<w{AsaxsDCCFwqPmSyV;4%7z(>4M<a&R>P&L5?
+z$N|VF*g1^vZ}0yS!D>3-Z0OQ8x_eok;<_|~{CTTu=w#hg4+>)lzN>cS+V6@Nm3z_%
+zgm-*lqp2w}jF}`P^vIB_lQ8dRxJI+mU1{J-oeI$mV|yrlnGr%^P?3egmC3-v*c|q=
+zJ<&GUjL_MkewAhi+Sm(kcl<=J3B~0Z6_Y40i^2+>(SVT+7$M4u0_Qfezx`a6yFcpp
+zBh(2Ng`}_lL;T#ubRUeLcf*Gp`4Y<JV-%_~Tiy1)4~p`=tB9iO-rb7C5b1$rEj0Bv
+z#L(+o<J*?kH@p%dqv(eC_g>`pR1Gj6`KtW2^5BLZoV7PYKZg4rRaN;^eWTRNrz-c<
+z*MJFQ5tML7L?2=bPL1S}rpArxbVFiiECH<UN*_Bi?gjXIZ-KGULxzh;L0aHCm!>);
+zbTJLb%jJxSY%qAncHF#_;vXT#kh+i}kR;Pxkf=o{Noxr$*ji?+HV~AJGuX#6(1HD2
+zk&NW5u1@Q!cZEywSX*H&{YV|nBXv`!K&<cCs{{dquoy2#&|YJkaM+JUB2Z1RfrT+p
+zV#|ZEofaL}JVdeK(p-eIJ=DSDd-noUjLJj@^u^#Lvxg!WyKgYQ#RBBbMMvEGM0mB^
+z4c4}Ut?g&Q`r4Cc4}wP{TTI+54fbA72ELV6cYNPm!x}!z@}xgXb@0%opkJV$-p0&S
+zGWTH6A0k^v4(v<JeC2X<;gDwM$MOB9W%z$N%K9l2k<B8B`z~Jrp-l;%+r-dS+ihIE
+zZLq{@)A3TL)9s+E85ojDTOJK<TWSpj`gOO{fsC91tzeukGqsWo>?{ZXz`M)!w_4XR
+zz%di)f-eZnX~HHNvJtc-{U!r$@2r<4_=?l%vdjyaWqtkYCp*u=&(V3oK$g}d&EW&6
+zibh_X2!mv%aEYJ{9@zwfkgpd<bF`iG3!{bPwvhdW-=UCCkdRlZyz_)>lO&=GaCu=1
+z5}8K7N*w3$*tmd*52^^0AkP8jmMOv8{aAx+6}UyDW#Y>^pJfpd4rwdAfkNiZBrQT-
+zH!L`<lH#)7b%b@|rr(ySJ%^t85tmb`dbhkQAU_}Fl6-Ddu7e0a^**gEd;Cnuai!vW
+zOO+*;$1#_q`#i?itfD~VJ4OVtk?}rfHV3A3#P*FR_qwoVT2(hmfHifK0iW`1z=Pb%
+zc=GZpe3Bz)FLh$^ER_7XEm?hB9*hP^v`r`D{28;I7FQvMiNg(1C;ch)+{6c395CEK
+z(>?O33LD3le-NB$5NG)bekH6GAinB}qel@XQPdJYegKV-sa$x6g<Six&OOtY?a1})
+z9ujZ+wrnhXicw>;^zA4TEXq-SvB^tyxp~b0a8RV9zW#zFC(r*yPd=5ETD?}U*O%*l
+M{aU?QpI!9+2T{Qi0ssI2
+
+literal 0
+HcmV?d00001
+
+diff --git a/speech_recognition/rnnt/eval_accuracy.sh b/speech_recognition/rnnt/eval_accuracy.sh
+new file mode 100755
+index 0000000..38b68a4
+--- /dev/null
++++ b/speech_recognition/rnnt/eval_accuracy.sh
+@@ -0,0 +1,34 @@
++#/bin/bash
++
++set -euo pipefail
++
++work_dir=`pwd`
++local_data_dir=$work_dir/local_data
++# librispeech_download_dir=$local_data_dir/LibriSpeech
++# stage=3
++
++# mkdir -p $work_dir $local_data_dir $librispeech_download_dir
++
++# install_dir=third_party/install
++# mkdir -p $install_dir
++# install_dir=$(readlink -f $install_dir)
++
++
++# export PATH="$install_dir/bin/:$PATH"
++
++# RUN Inference
++scenario=SingleStream
++backend=pytorch
++log_dir=$work_dir/run_logs/fp16/SingleStream
++
++
++python3 run.py --dataset_dir $local_data_dir \
++        --manifest $local_data_dir/dev-clean-wav.json \
++        --pytorch_config_toml pytorch/configs/rnnt.toml \
++        --pytorch_checkpoint $work_dir/rnnt.pt \
++        --scenario ${scenario} \
++        --backend ${backend} \
++        --log_dir ${log_dir} \
++        --accuracy
++
++
+diff --git a/speech_recognition/rnnt/eval_performance.sh b/speech_recognition/rnnt/eval_performance.sh
+new file mode 100755
+index 0000000..6e593db
+--- /dev/null
++++ b/speech_recognition/rnnt/eval_performance.sh
+@@ -0,0 +1,32 @@
++#/bin/bash
++
++set -euo pipefail
++
++work_dir=`pwd`
++local_data_dir=$work_dir/local_data
++# librispeech_download_dir=$local_data_dir/LibriSpeech
++# stage=3
++
++# mkdir -p $work_dir $local_data_dir $librispeech_download_dir
++
++# install_dir=third_party/install
++# mkdir -p $install_dir
++# install_dir=$(readlink -f $install_dir)
++
++
++# export PATH="$install_dir/bin/:$PATH"
++
++# RUN Inference
++scenario=SingleStream
++backend=pytorch
++log_dir=$work_dir/run_logs/fp16/SingleStream
++
++
++python3 run.py --dataset_dir $local_data_dir \
++        --manifest $local_data_dir/dev-clean-wav.json \
++        --pytorch_config_toml pytorch/configs/rnnt.toml \
++        --pytorch_checkpoint $work_dir/rnnt.pt \
++        --scenario ${scenario} \
++        --backend ${backend} \
++        --log_dir ${log_dir}
++
+diff --git a/speech_recognition/rnnt/pytorch/decoders.py b/speech_recognition/rnnt/pytorch/decoders.py
+index 7f6d405..c7fcc22 100644
+--- a/speech_recognition/rnnt/pytorch/decoders.py
++++ b/speech_recognition/rnnt/pytorch/decoders.py
+@@ -61,7 +61,7 @@ class ScriptGreedyDecoder(torch.nn.Module):
+         # Apply optional preprocessing
+ 
+         logits, logits_lens = self._model.encoder(x, out_lens)
+-
++        
+         output: List[List[int]] = []
+         for batch_idx in range(logits.size(0)):
+             inseq = logits[batch_idx, :, :].unsqueeze(1)
+diff --git a/speech_recognition/rnnt/pytorch/model_separable_rnnt.py b/speech_recognition/rnnt/pytorch/model_separable_rnnt.py
+index 68a0ed6..3bed417 100644
+--- a/speech_recognition/rnnt/pytorch/model_separable_rnnt.py
++++ b/speech_recognition/rnnt/pytorch/model_separable_rnnt.py
+@@ -80,6 +80,7 @@ class Encoder(torch.nn.Module):
+         )
+ 
+     def forward(self, x_padded: torch.Tensor, x_lens: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
++        x_padded = x_padded.cuda()
+         x_padded, _ = self.pre_rnn(x_padded, None)
+         x_padded, x_lens = self.stack_time(x_padded, x_lens)
+         # (T, B, H)
+@@ -131,6 +132,7 @@ class Prediction(torch.nn.Module):
+             B = 1
+             y = torch.zeros((B, 1, self.n_hidden), dtype=torch.float32)
+         else:
++            y = y.cuda()
+             y = self.embed(y)
+ 
+         # if state is None:
+@@ -142,6 +144,7 @@ class Prediction(torch.nn.Module):
+         #    ]
+ 
+         y = y.transpose(0, 1)  # .contiguous()   # (U + 1, B, H)
++        y = y.cuda().to(torch.float16)
+         g, hid = self.dec_rnn(y, state)
+         g = g.transpose(0, 1)  # .contiguous()   # (B, U + 1, H)
+         # del y, state
+diff --git a/speech_recognition/rnnt/pytorch/tv_utils.py b/speech_recognition/rnnt/pytorch/tv_utils.py
+new file mode 100644
+index 0000000..6ef39b0
+--- /dev/null
++++ b/speech_recognition/rnnt/pytorch/tv_utils.py
+@@ -0,0 +1,11 @@
++import torch
++import numpy as np
++import os
++
++
++def save_tensor_to_binfile(tensor : torch.Tensor, bin_file):
++    pt_file = bin_file[:-3] + 'pth'
++    torch.save(tensor.cpu(), pt_file)
++    npy = tensor.cpu().numpy()
++    npy.tofile(bin_file)
++    
+\ No newline at end of file
+diff --git a/speech_recognition/rnnt/pytorch_SUT.py b/speech_recognition/rnnt/pytorch_SUT.py
+index 5695479..5683154 100644
+--- a/speech_recognition/rnnt/pytorch_SUT.py
++++ b/speech_recognition/rnnt/pytorch_SUT.py
+@@ -29,6 +29,17 @@ from helpers import add_blank_label
+ from preprocessing import AudioPreprocessing
+ from model_separable_rnnt import RNNT
+ 
++from torch.autograd.profiler import profile
++import pickle
++
++# sample evaluation
++import json
++from helpers import __gather_predictions as gather_predictions
++from metrics import __levenshtein as levenshtein
++from typing import List
++import time
++
++sample_counter = 0
+ 
+ def load_and_migrate_checkpoint(ckpt_path):
+     checkpoint = torch.load(ckpt_path, map_location="cpu")
+@@ -40,24 +51,45 @@ def load_and_migrate_checkpoint(ckpt_path):
+     del migrated_state_dict["audio_preprocessor.featurizer.window"]
+     return migrated_state_dict
+ 
++def process_evaluation_sample(hypotheses: List[str], references: List[str]):
++        global sample_counter
++        sample_counter += 1
++        scores = 0
++        words = 0
++        if len(hypotheses) != len(references):
++            raise ValueError("In word error rate calculation, hypotheses and reference"
++                         " lists must have the same number of elements. But I got:"
++                         "{0} and {1} correspondingly".format(len(hypotheses), len(references)))
++        h_list = hypotheses[0].split()
++        r_list = references[0].split()
++        words = len(r_list)
++        scores = levenshtein(h_list, r_list)
++        ret_str = f' Sample#: {sample_counter} \n' + f' prediction:{h_list}\n' + f' label:     {r_list}'
++        if words != 0:
++            wer = (1.0 * scores) / words
++        else:
++            wer = float('inf')
++        return wer, ret_str
++
+ 
+ class PytorchSUT:
+-    def __init__(self, config_toml, checkpoint_path, dataset_dir,
+-                 manifest_filepath, perf_count):
++    def __init__(self, config_toml, checkpoint_path, dataset_dir,manifest_filepath, 
++                perf_count, use_nnrt=False, model_file=None, enable_compare=False, 
++                compute_wer_per_sample=False, log_dir=None):
+         config = toml.load(config_toml)
+ 
+         dataset_vocab = config['labels']['labels']
+         rnnt_vocab = add_blank_label(dataset_vocab)
+         featurizer_config = config['input_eval']
+ 
+-        self.sut = lg.ConstructSUT(self.issue_queries, self.flush_queries,
+-                                   self.process_latencies)
++        # sample evaluation
++        self.sut = lg.ConstructSUT(self.issue_queries_fp16, self.flush_queries, self.process_latencies)
+         self.qsl = AudioQSLInMemory(dataset_dir,
+                                     manifest_filepath,
+                                     dataset_vocab,
+                                     featurizer_config["sample_rate"],
+                                     perf_count)
+-        self.audio_preprocessor = AudioPreprocessing(**featurizer_config)
++        self.audio_preprocessor = AudioPreprocessing(**featurizer_config).cuda().half()
+         self.audio_preprocessor.eval()
+         self.audio_preprocessor = torch.jit.script(self.audio_preprocessor)
+         self.audio_preprocessor = torch.jit._recursive.wrap_cpp_module(
+@@ -67,10 +99,17 @@ class PytorchSUT:
+             feature_config=featurizer_config,
+             rnnt=config['rnnt'],
+             num_classes=len(rnnt_vocab)
+-        )
++        ).cuda()
+         model.load_state_dict(load_and_migrate_checkpoint(checkpoint_path),
+                               strict=True)
+         model.eval()
++        model.half()
++
++        # Print Parameter
++        print('Weights/bias of RNNT:')
++        for item in model.named_parameters():
++            print('Name:{} Size:{} Device:{} Dtype:{}'.format(item[0], item[1].size(), item[1].device, item[1].dtype))
++
+         model.encoder = torch.jit.script(model.encoder)
+         model.encoder = torch.jit._recursive.wrap_cpp_module(
+             torch._C._freeze_module(model.encoder._c))
+@@ -84,7 +123,200 @@ class PytorchSUT:
+ 
+         self.greedy_decoder = ScriptGreedyDecoder(len(rnnt_vocab) - 1, model)
+ 
+-    def issue_queries(self, query_samples):
++        # sample evaluation
++        self.labels = [" ", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z", "'"]
++        qsl = AudioQSL("./local_data", "./local_data/dev-clean-wav.json", self.labels)
++        self.manifest = qsl.manifest
++        # init NNCompiler
++        self.use_nnrt = use_nnrt
++        self.nncompiler = None
++        self.total_cnt = 0
++        self.incorrect_cnt = 0
++        self.correct_cnt = 0
++        self.enable_compare = enable_compare
++        self.compute_wer_per_sample = compute_wer_per_sample
++        self.log_dir = log_dir
++        if compute_wer_per_sample and  os.path.exists(log_dir):
++            if os.path.exists(os.path.join(self.log_dir, 'wer_per_sample.txt')):
++                os.remove(os.path.join(self.log_dir, 'wer_per_sample.txt'))
++        if self.use_nnrt:
++            # Load NNCompiler
++            sys.path.append('/opt/rocm/lib')
++            import NNCompiler
++            if model_file is None:
++                self.greedy_decoder = torch.jit.script(self.greedy_decoder)
++                self.greedy_decoder = torch.jit.freeze(self.greedy_decoder)
++                self.greedy_decoder.save('rnnt_freeze.torchscript')
++                model_file = "./rnnt_freeze.torchscript"
++            self.nncompiler = NNCompiler.PipelineManager(model_file, 'RNNT')
++
++             # warm-up with dummy inputs
++            dummy_input1 = torch.ones([341, 1, 240]).half().cuda()
++            dummy_input2 = torch.tensor([341], dtype=torch.int64)
++            for i in range(5):
++                print("Wram-up run ", i)
++                _ = self.nncompiler.inferenceModel([dummy_input1, dummy_input2])
++        else:
++            dummy_input1 = torch.ones([341, 1, 240]).half().cuda()
++            dummy_input2 = torch.tensor([341], dtype=torch.int64)
++            for i in range(5):
++                print("Wram-up run ", i)
++                _ = self.greedy_decoder.forward(dummy_input1, dummy_input2)
++        torch.cuda.synchronize()
++
++    def compare_result(self, transcript, rt_transcript):
++        pt_transcript_array = np.array(transcript[0])
++        rt_transcript_array = rt_transcript.squeeze(0).cpu().numpy()
++
++        status = True
++        if pt_transcript_array.shape[0] == rt_transcript_array.shape[0]:
++            # compare elements
++            status = (pt_transcript_array == rt_transcript_array).all()
++        else:
++            status = False
++        self.total_cnt += 1
++        if not status:
++            self.incorrect_cnt += 1
++            # print('Not Equal: [{}/{}]'.format(self.incorrect_cnt, self.total_cnt))
++            # print('PyTorch: {}'.format(pt_transcript_array))
++            # print('NNCompiler: {}'.format(rt_transcript_array))
++        else:
++            self.correct_cnt += 1
++            # print('Equal: [{}/{}]'.format(self.correct_cnt, self.total_cnt))
++        return status
++
++
++    def issue_queries_fp16(self, query_samples):
++        for query_sample in query_samples:
++            waveform = self.qsl[query_sample.index]
++            assert waveform.ndim == 1
++            waveform_length = np.array(waveform.shape[0], dtype=np.int64)
++            waveform = np.expand_dims(waveform, 0)
++            waveform_length = np.expand_dims(waveform_length, 0)
++            with torch.no_grad():
++                waveform = torch.from_numpy(waveform)
++                waveform_length = torch.from_numpy(waveform_length)
++                feature, feature_length = self.audio_preprocessor.forward((waveform.cuda().half(), waveform_length))
++                assert feature.ndim == 3
++                assert feature_length.ndim == 1
++                feature = feature.permute(2, 0, 1)
++                transcript = None
++                if not self.use_nnrt:
++                    # inference using PyTorch
++                    _, _, pt_transcript = self.greedy_decoder.forward(feature.half(), feature_length)
++                    transcript = pt_transcript
++                else:
++                    # inference using NNCompiler
++                    _, _, rt_transcript = self.nncompiler.inferenceModel([feature.half(), feature_length])
++                    transcript = rt_transcript.cpu().numpy()
++                    if self.enable_compare:
++                        _, _, pt_transcript = self.greedy_decoder.forward(feature.half(), feature_length)
++                        assert self.compare_result(pt_transcript, rt_transcript)
++                if self.compute_wer_per_sample:
++                    references = []
++                    references.append(self.manifest[query_sample.index]["transcript"])
++                    hypotheses = gather_predictions([transcript], labels=self.labels)
++                    references = gather_predictions([references], labels=self.labels)
++                    wer, ret_str = process_evaluation_sample(hypotheses, references)
++                    wer_str = ' WER per Sample: {:}%'.format(wer * 100)
++                    print()
++                    if self.log_dir:
++                        with open(os.path.join(self.log_dir, 'wer_per_sample.txt'), mode='a') as f:
++                            f.write(f'{ret_str}\n' + wer_str + '\n\n')
++                    print(f'{ret_str}\n{wer_str}')
++
++            assert len(transcript) == 1
++            response_array = array.array('q', transcript[0])
++            bi = response_array.buffer_info()
++            response = lg.QuerySampleResponse(query_sample.id, bi[0],
++                                              bi[1] * response_array.itemsize)
++            lg.QuerySamplesComplete([response])
++
++
++    def issue_queries_with_profile(self, query_samples):
++        for query_sample in query_samples:
++            waveform = self.qsl[query_sample.index]
++            assert waveform.ndim == 1
++            waveform_length = np.array(waveform.shape[0], dtype=np.int64)
++            waveform = np.expand_dims(waveform, 0)
++            waveform_length = np.expand_dims(waveform_length, 0)
++            with torch.no_grad():
++                waveform = torch.from_numpy(waveform)
++                waveform_length = torch.from_numpy(waveform_length)
++                #----------------------------------------Preprocess-------------------------------------
++                
++                waveform = torch.load('profile_logs/input_tensors/waveform.pth').cuda().half()
++                waveform_length = torch.load('profile_logs/input_tensors/waveform_length.pth').cuda()
++
++                WARM_UP = 10
++                # Warn-up
++                for _ in range(WARM_UP):
++                    with profile(enabled=True, use_cuda=True, record_shapes=False, profile_memory=False, with_stack=False) as prof:
++                        feature, feature_length = self.audio_preprocessor.forward((waveform, waveform_length))
++                # Profile
++                with profile(enabled=True, use_cuda=True, record_shapes=False, profile_memory=False, with_stack=False) as prof:
++                    feature, feature_length = self.audio_preprocessor.forward((waveform, waveform_length))
++
++                # # Grouped logs
++                print(prof.key_averages().table(row_limit=1000000, sort_by='cuda_time_total', top_level_events_only=False))
++                # Full logs
++                print(prof.table(row_limit=1000000, top_level_events_only=False))
++                # JSON
++                prof.export_chrome_trace('profile_logs/rnnt_preprocess_profile.json')
++                with open('profile_logs/rnnt_preprocess_profiler_eventlist_amdgpu.pkl', 'wb') as f:
++                    pickle.dump(prof, f)
++                
++                exit()
++
++                feature = torch.load('profile_logs/input_tensors/feature.pth').cuda().half()
++                feature_length = torch.load('profile_logs/input_tensors/feature_length.pth').cuda()
++
++                assert feature.ndim == 3
++                assert feature_length.ndim == 1
++                feature = feature.permute(2, 0, 1)
++
++                #-----------------------------------------Forward---------------------------------------------
++                print('='*100)
++                print('Forward!!!')
++                print('*'*20)
++
++                print('feature:{} {}'.format(feature.size(), feature.dtype))
++                print('feature_length:{} {}'.format(feature_length.size(), feature_length.dtype))
++
++                # Warn-up
++                RECORD_SAHPE = False
++                for _ in range(WARM_UP):
++                    with profile(enabled=True, use_cuda=True, record_shapes=RECORD_SAHPE, profile_memory=False, with_stack=False) as prof:
++                        _, _, transcript = self.greedy_decoder.forward(feature, feature_length)
++                print("Finished warn up!")
++
++                # Profile
++                with profile(enabled=True, use_cuda=True, record_shapes=RECORD_SAHPE, profile_memory=False, with_stack=False) as prof:
++                    _, _, transcript = self.greedy_decoder.forward(feature, feature_length)
++                
++                # Grouped OP logs
++                print(prof.key_averages().table(row_limit=1000000, sort_by='cuda_time_total', top_level_events_only=False))
++                # Grouped Shape logs
++                print(prof.key_averages(group_by_input_shape=RECORD_SAHPE).table(row_limit=1000000, sort_by='cuda_time_total', top_level_events_only=False))
++                # Full logs
++                # print(prof.table(row_limit=1000000, top_level_events_only=False))
++                # JSON
++                prof.export_chrome_trace('profile_logs/rnnt_profile.json')
++                with open('profile_logs/rnnt_greedy_decoder_profiler_eventlist_amdgpu.pkl', 'wb') as f:
++                    pickle.dump(prof, f)
++                
++                print("Profile greedy_decoder Done")
++                exit()
++
++            assert len(transcript) == 1
++            response_array = array.array('q', transcript[0])
++            bi = response_array.buffer_info()
++            response = lg.QuerySampleResponse(query_sample.id, bi[0],
++                                              bi[1] * response_array.itemsize)
++            lg.QuerySamplesComplete([response])
++    
++
++    def issue_queries_original(self, query_samples):
+         for query_sample in query_samples:
+             waveform = self.qsl[query_sample.index]
+             assert waveform.ndim == 1
+@@ -105,12 +337,14 @@ class PytorchSUT:
+             response_array = array.array('q', transcript[0])
+             bi = response_array.buffer_info()
+             response = lg.QuerySampleResponse(query_sample.id, bi[0],
+-                                              bi[1] * response_array.itemsize)
++                                                bi[1] * response_array.itemsize)
+             lg.QuerySamplesComplete([response])
+ 
++
+     def flush_queries(self):
+         pass
+ 
++
+     def process_latencies(self, latencies_ns):
+         print("Average latency (ms) per query:")
+         print(np.mean(latencies_ns)/1000000.0)
+@@ -119,6 +353,12 @@ class PytorchSUT:
+         print("90 percentile latency (ms): ")
+         print(np.percentile(latencies_ns, 90)/1000000.0)
+ 
++
+     def __del__(self):
+         lg.DestroySUT(self.sut)
+         print("Finished destroying SUT.")
++        if self.enable_compare:
++            print('total_sample: {}'.format(self.total_cnt))
++            print('correct_sample: {}'.format(self.correct_cnt))
++            print('incorrect_sample: {}'.format(self.incorrect_cnt))
++
+diff --git a/speech_recognition/rnnt/run.py b/speech_recognition/rnnt/run.py
+index 8ee3143..2178318 100644
+--- a/speech_recognition/rnnt/run.py
++++ b/speech_recognition/rnnt/run.py
+@@ -26,7 +26,7 @@ MLPERF_CONF = MLPERF_CONF.resolve()
+ 
+ def get_args():
+     parser = argparse.ArgumentParser()
+-    parser.add_argument("--backend", choices=["pytorch"], default="pytorch", help="Backend")
++    parser.add_argument("--backend", choices=["pytorch", "NNCompiler"], default="pytorch", help="Backend")
+     parser.add_argument("--scenario", choices=["SingleStream", "Offline", "Server"], default="Offline", help="Scenario")
+     parser.add_argument("--accuracy", action="store_true", help="enable accuracy pass")
+     parser.add_argument("--mlperf_conf", default=str(MLPERF_CONF), help="mlperf rules config")
+@@ -36,7 +36,11 @@ def get_args():
+     parser.add_argument("--dataset_dir", required=True)
+     parser.add_argument("--manifest", required=True)
+     parser.add_argument("--perf_count", type=int, default=None)
+-    parser.add_argument("--log_dir", required=True)
++    parser.add_argument("--log_dir", type=str)
++    parser.add_argument("--model_file", default=None,
++                        help='path to rnnt model file (torchscript graph, required by nnrt')
++    parser.add_argument("--enable_compare")
++    parser.add_argument("--compute_wer_per_sample", action="store_true", help="enable print WER of per sample")
+     args = parser.parse_args()
+     return args
+ 
+@@ -50,11 +54,15 @@ scenario_map = {
+ 
+ def main():
+     args = get_args()
+-
++ 
++    from pytorch_SUT import PytorchSUT
+     if args.backend == "pytorch":
+-        from pytorch_SUT import PytorchSUT
+         sut = PytorchSUT(args.pytorch_config_toml, args.pytorch_checkpoint,
+-                         args.dataset_dir, args.manifest, args.perf_count)
++                         args.dataset_dir, args.manifest, args.perf_count, compute_wer_per_sample=args.compute_wer_per_sample, log_dir=args.log_dir)
++    elif args.backend == "NNCompiler":
++        compare = True if args.enable_compare else False
++        sut = PytorchSUT(args.pytorch_config_toml, args.pytorch_checkpoint,
++                         args.dataset_dir, args.manifest, args.perf_count, True, args.model_file, compare, compute_wer_per_sample=args.compute_wer_per_sample, log_dir=args.log_dir)
+     else:
+         raise ValueError("Unknown backend: {:}".format(args.backend))
+ 
+@@ -86,6 +94,5 @@ def main():
+ 
+     print("Done!")
+ 
+-
+ if __name__ == "__main__":
+     main()
+diff --git a/speech_recognition/rnnt/run_simple.sh b/speech_recognition/rnnt/run_simple.sh
+new file mode 100755
+index 0000000..478024d
+--- /dev/null
++++ b/speech_recognition/rnnt/run_simple.sh
+@@ -0,0 +1,39 @@
++#/bin/bash
++
++set -euo pipefail
++
++work_dir=`pwd`
++local_data_dir=$work_dir/local_data
++# librispeech_download_dir=$local_data_dir/LibriSpeech
++# stage=3
++
++# mkdir -p $work_dir $local_data_dir $librispeech_download_dir
++
++# install_dir=third_party/install
++# mkdir -p $install_dir
++# install_dir=$(readlink -f $install_dir)
++
++
++# export PATH="$install_dir/bin/:$PATH"
++
++# RUN Inference
++
++#    --accuracy                        # enable: accuracy test, else performance test
++#    --compute_wer_per_sample \        # compute and print WER of per sample
++#    --enable_compare                  # enable this will run RNNT both on PyTorch & NNCompiler, then compare the results
++
++scenario=SingleStream
++backend=NNCompiler     # option:[NNCompiler, pytorch]
++log_dir=$work_dir/run_logs/test/fp16/SingleStream
++model_file=path_to_model/rnnt_freeze.torchscript
++
++# Run with NNCompiler or PyTorch
++python3 run.py --dataset_dir $local_data_dir \
++        --manifest $local_data_dir/dev-clean-wav.json \
++        --pytorch_config_toml pytorch/configs/rnnt.toml \
++        --pytorch_checkpoint $work_dir/rnnt.pt \
++        --scenario ${scenario} \
++        --backend ${backend} \
++        --log_dir ${log_dir} \
++        --accuracy
++        # --model_file ${model_file} 
+diff --git a/speech_recognition/rnnt/run_srcx.sh b/speech_recognition/rnnt/run_srcx.sh
+new file mode 100755
+index 0000000..40d0bf9
+--- /dev/null
++++ b/speech_recognition/rnnt/run_srcx.sh
+@@ -0,0 +1,77 @@
++#/bin/bash
++
++set -euo pipefail
++
++work_dir=`pwd`
++
++local_data_dir=$work_dir/local_data
++librispeech_download_dir=$local_data_dir/LibriSpeech
++stage=3
++
++mkdir -p $work_dir $local_data_dir $librispeech_download_dir
++
++# install_dir=third_party/install
++# mkdir -p $install_dir
++# install_dir=$(readlink -f $install_dir)
++
++# set +u
++# source "$($CONDA_EXE info --base)/etc/profile.d/conda.sh"
++# set -u
++
++# # stage -1: install dependencies
++# if [[ $stage -le -1 ]]; then
++#     conda env create --force -v --file environment.yml
++
++#     set +u
++#     source "$(conda info --base)/etc/profile.d/conda.sh"
++#     conda activate mlperf-rnnt
++#     set -u
++
++#     # We need to convert .flac files to .wav files via sox. Not all sox installs have flac support, so we install from source.
++#     wget https://ftp.osuosl.org/pub/xiph/releases/flac/flac-1.3.2.tar.xz -O third_party/flac-1.3.2.tar.xz
++#     (cd third_party; tar xf flac-1.3.2.tar.xz; cd flac-1.3.2; ./configure --prefix=$install_dir && make && make install)
++
++#     wget https://sourceforge.net/projects/sox/files/sox/14.4.2/sox-14.4.2.tar.gz -O third_party/sox-14.4.2.tar.gz
++#     (cd third_party; tar zxf sox-14.4.2.tar.gz; cd sox-14.4.2; LDFLAGS="-L${install_dir}/lib" CFLAGS="-I${install_dir}/include" ./configure --prefix=$install_dir --with-flac && make && make install)
++
++#     (cd $(git rev-parse --show-toplevel)/loadgen; python setup.py install)
++# fi
++
++# export PATH="$install_dir/bin/:$PATH"
++
++# set +u
++# conda activate mlperf-rnnt
++# set -u
++
++# # stage 0: download model. Check checksum to skip?
++# if [[ $stage -le 0 ]]; then
++#   wget https://zenodo.org/record/3662521/files/DistributedDataParallel_1576581068.9962234-epoch-100.pt?download=1 -O $work_dir/rnnt.pt
++# fi
++
++# stage 1: download data. This will hae a non-zero exit code if the
++# checksum is incorrect.
++
++install_dir=third_party/install
++mkdir -p $install_dir
++install_dir=$(readlink -f $install_dir)
++
++    # We need to convert .flac files to .wav files via sox. Not all sox installs have flac support, so we install from source.
++wget https://ftp.osuosl.org/pub/xiph/releases/flac/flac-1.3.2.tar.xz -O third_party/flac-1.3.2.tar.xz
++(cd third_party; tar xf flac-1.3.2.tar.xz; cd flac-1.3.2; ./configure --prefix=$install_dir && make && make install)
++
++wget https://sourceforge.net/projects/sox/files/sox/14.4.2/sox-14.4.2.tar.gz -O third_party/sox-14.4.2.tar.gz
++(cd third_party; tar zxf sox-14.4.2.tar.gz; cd sox-14.4.2; LDFLAGS="-L${install_dir}/lib" CFLAGS="-I${install_dir}/include" ./configure --prefix=$install_dir --with-flac && make && make install)
++
++export PATH="$install_dir/bin/:$PATH"
++
++python pytorch/utils/download_librispeech.py \
++        pytorch/utils/librispeech-inference.csv \
++        $librispeech_download_dir \
++        -e $local_data_dir
++
++
++
++python pytorch/utils/convert_librispeech.py \
++    --input_dir $librispeech_download_dir/dev-clean \
++    --dest_dir $local_data_dir/dev-clean-wav \
++    --output_json $local_data_dir/dev-clean-wav.json
+-- 
+2.17.1
+

@@ -1,0 +1,1172 @@
+From 23d0fd2b178bb88bca17ec007aa422f5955cdc34 Mon Sep 17 00:00:00 2001
+From: Guoqiang He <guoq.he@samsung.com>
+Date: Fri, 2 Apr 2021 16:32:37 +0000
+Subject: [PATCH] enable PIM for GNMT model
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+1. Add translator script comes from inference project
+2. Convert the gnmt to torchscript
+3.feat: 🎸 Support NNRuntime for gnmt inference
+ - Support NNRuntime for gnmt inference.
+ - Update gnmt_torchscipt.md and rename to HOWTORUN.md.
+4. feat: 🎸 Support ir compile mode, format code
+ - Support ir compile mode, format code
+5. fix: 🐛 Change default gpu from 1 to 0 to avoid runtime error
+ - Change default gpu from 1 to 0 to avoid runtime error
+   when running on single gpu env
+6. docs: ✏️ Update doc and add run_eval.sh script
+7. docs: ✏️ Update requirement.txt for install sacrebleu
+8. feat: 🎸 Add pim init and deinit for gnmt
+ - Add pim init and deinit for gnmt in translate.py
+9. feat: 🎸 Add warm-up
+ - Add warm-up for gnmt in translate.py
+10. feat: 🎸 Change ir-file arg to optional when compile_level is 0
+ - Change ir-file arg to optional when compile_level is 0
+11. Adapt NNCompiler python api for gnmt model
+
+Contributors:
+ Guoqiang He <guoq.he@samsung.com>
+ hao11.wang <hao11.wang@samsung.com>
+ penghui.wei <penghui.wei@samsung.com>
+ yao01.xiao <yao01.xiao@samsung.com>
+---
+ .gitmodules                                   |   3 -
+ README.md                                     | 201 ++++++++----
+ rnn_translator/.gitignore                     |   1 +
+ rnn_translator/download_dataset.sh            |  10 +-
+ rnn_translator/pytorch/requirements.txt       |   8 +-
+ rnn_translator/pytorch/run_eval.sh            |  15 +
+ .../pytorch/{run.sh => run_training.sh}       |   0
+ .../pytorch/seq2seq/inference/beam_search.py  |  40 ++-
+ .../pytorch/seq2seq/inference/inference.py    |  28 +-
+ .../pytorch/seq2seq/models/attention.py       |  10 +-
+ .../pytorch/seq2seq/models/decoder.py         |  71 +++--
+ .../pytorch/seq2seq/models/encoder.py         |  20 +-
+ rnn_translator/pytorch/seq2seq/models/gnmt.py |   4 +-
+ .../pytorch/seq2seq/models/seq2seq_base.py    |   2 +
+ rnn_translator/pytorch/translate.py           | 301 +++++++++++++-----
+ 15 files changed, 518 insertions(+), 196 deletions(-)
+ create mode 100755 rnn_translator/pytorch/run_eval.sh
+ rename rnn_translator/pytorch/{run.sh => run_training.sh} (100%)
+
+diff --git a/.gitmodules b/.gitmodules
+index 62ccfa2..6803ee5 100644
+--- a/.gitmodules
++++ b/.gitmodules
+@@ -4,9 +4,6 @@
+ [submodule "object_detection/detectron"]
+ 	path = object_detection/caffe2/detectron
+ 	url = https://github.com/ddkang/Detectron.git
+-[submodule "community"]
+-	path = community
+-	url = https://github.com/mlperf/community.git
+ [submodule "compliance/verify_submission/mlperf_submission_helper/mlp_compliance"]
+ 	path = compliance/verify_submission/mlperf_submission_helper/mlp_compliance
+ 	url = https://github.com/bitfort/mlp_compliance
+diff --git a/README.md b/README.md
+index 70346f3..ec9922b 100644
+--- a/README.md
++++ b/README.md
+@@ -1,54 +1,147 @@
+-# MLPerf Reference Implementations
+-
+-This is a repository of reference implementations for the MLPerf benchmark. These implementations are valid as starting points for benchmark implementations but are not fully optimized and are not intended to be used for "real" performance measurements of software frameworks or hardware. 
+-
+-# Preliminary release (v0.5)
+-
+-This release is very much an "alpha" release -- it could be improved in many ways. The benchmark suite is still being developed and refined, see the Suggestions section below to learn how to contribute. 
+-
+-We anticipate a significant round of updates at the end of May based on input from users.
+-
+-# Contents
+-
+-We provide reference implementations for each of the 7 benchmarks in the MLPerf suite. 
+-
+-* image_classification - Resnet-50 v1 applied to Imagenet.
+-* object_detection - Mask R-CNN applied to COCO. 
+-* single_stage_detector - SSD applied to COCO 2017.
+-* speech_recognition - DeepSpeech2 applied to Librispeech.
+-* translation - Transformer applied to WMT English-German.
+-* recommendation - Neural Collaborative Filtering applied to MovieLens 20 Million (ml-20m).
+-* sentiment_analysis - Seq-CNN applied to IMDB dataset.
+-* reinforcement - Mini-go applied to predicting pro game moves.
+-
+-Each reference implementation provides the following:
+- 
+-* Code that implements the model in at least one framework.
+-* A Dockerfile which can be used to run the benchmark in a container.
+-* A script which downloads the appropriate dataset.
+-* A script which runs and times training the model.
+-* Documentation on the dataset, model, and machine setup.
+-
+-# Running Benchmarks
+-
+-These benchmarks have been tested on the following machine configuration:
+-
+-* 16 CPUs, one Nvidia P100.
+-* Ubuntu 16.04, including docker with nvidia support.
+-* 600GB of disk (though many benchmarks do require less disk).
+-* Either CPython 2 or CPython 3, depending on benchmark (see Dockerfiles for details).
+-
+-Generally, a benchmark can be run with the following steps:
+-
+-1. Setup docker & dependencies. There is a shared script (install_cuda_docker.sh) to do this. Some benchmarks will have additional setup, mentioned in their READMEs.
+-2. Download the dataset using `./download_dataset.sh`. This should be run outside of docker, on your host machine. This should be run from the directory it is in (it may make assumptions about CWD).
+-3. Optionally, run `verify_dataset.sh` to ensure the was successfully downloaded.
+-4. Build and run the docker image, the command to do this is included with each Benchmark. 
+-
+-Each benchmark will run until the target quality is reached and then stop, printing timing results. 
+-
+-Some these benchmarks are rather slow or take a long time to run on the reference hardware (i.e. 16 CPUs and one P100). We expect to see significant performance improvements with more hardware and optimized implementations. 
+-
+-# Suggestions
+-
+-We are still in the early stages of developing MLPerf and we are looking for areas to improve, partners, and contributors. If you have recommendations for new benchmarks, or otherwise would like to be involved in the process, please reach out to `info@mlperf.org`. For technical bugs or support, email `support@mlperf.org`.
++# MLPerf GNMT Inference w/FP16
++## Run with torchscript
++### Install Dependencies
++
++Install python 3.7.2, pytorch 1.6 and cuda 10.
++Install other dependencies
++```
++pip3 install -r requirements.txt
++```
++This code only has been tested only the versions listed above.
++
++### Run
++- Download and verify the dataset.
++
++```
++cd rnn_translator/
++bash download_dataset.sh
++bash verify_dataset.sh
++```
++
++- Download the pretrained model into the pytorch directory in the training code.
++
++```
++cd pytorch
++wget https://zenodo.org/record/2581623/files/model_best.pth
++```
++- Evaluate model accuracy to ensure the model reaches the target accuracy
++```
++python3 translate.py --input ../data/newstest2014.tok.clean.bpe.32000.en \
++--output output_file --model model_best.pth \
++--reference ../data/newstest2014.de --beam-size 10 \
++--math fp32 --dataset-dir ../data --mode accuracy
++```
++
++- Evaluate Performance.
++```
++python3 translate.py --input ../data/newstest2014.tok.clean.bpe.32000.en \
++--output output_file --model model_best.pth \
++--reference ../data/newstest2014.de --beam-size 10 \
++--math fp32 --dataset-dir ../data --mode performance
++```
++There will be an output printout like the following in the performance mode:
++```
++TEST Time 1.843 (1.843) Decoder iters 76.0 (76.0)       Tok/s 3818 (3818)
++TEST Time 1.597 (2.078) Decoder iters 57.0 (74.3)       Tok/s 4166 (3588)
++TEST Time 1.775 (2.027) Decoder iters 70.0 (73.4)       Tok/s 3729 (3640)
++TEST Time 2.187 (2.009) Decoder iters 78.0 (74.2)       Tok/s 3744 (3653)
++TEST Time 2.038 (2.026) Decoder iters 79.0 (74.5)       Tok/s 3579 (3639)
++TEST SUMMARY:
++Lines translated: 3003  Avg total tokens/s: 3648
++```
++
++## Run with NNRuntime
++### Start Docker
++Docker image: fim-rocm4.0:pytorch-1.7
++Docker launch script: https://github.sec.samsung.net/FIM/FIMLibrary/blob/develop/docker/docker-fim.sh
++
++Docker usage:
++```
++./docker-fim.sh fim-rocm4.0:pytorch-1.7 <directory>
++```
++
++**Option**: If need to run RNNT with **NNRuntime**, use this docker image: `pim-rocm4.0:tf2.3-dev` 
++
++### Get code
++```
++git clone https://github.sec.samsung.net/PIM/MLPerf_training.git
++
++git checkout gnmt_torchscript
++```
++### Install Dependencies
++
++PyTorch should already be installed in docker
++
++Install other dependencies
++```
++pip3 install -r rnn_translator/pytorch/requirements.txt
++```
++### Get dataset and model
++Download and verify the dataset.
++
++```
++cd rnn_translator/
++bash download_dataset.sh
++bash verify_dataset.sh
++```
++
++Download the pretrained model into the pytorch directory in the training code.
++
++```
++cd pytorch
++wget https://zenodo.org/record/2581623/files/model_best.pth
++```
++Prepare gnmt ir-file.
++### Setup enviroment variables for nnrt
++```
++
++export LIBTORCH_DIR=/home/user/.local/lib/python3.6/site-packages/torch
++
++export LD_LIBRARY_PATH=$LIBTORCH_DIR/lib:$LD_LIBRARY_PATH
++
++export PYTHONPATH=$PYTHONPATH:/opt/rocm/lib/
++
++export ME_PASS_CONFIG_PATH=/export ME_PASS_CONFIG_PATH=path/to/your/pass_config.json
++ ```
++This JSON file provided here: 
++https://github.sec.samsung.net/PIM/NNCompiler/blob/develop/compiler/include/middlend/passes/pass_config.json
++
++### Run with nnrt backend
++
++Please refer to `rnnt_translator/pytorch/run_eval.sh`
++
++Evaluate model accuracy
++
++```
++python3 translate.py \
++    --input ../data/newstest2014.tok.clean.bpe.32000.en \
++    --output output_file \
++    --model model_best.pth \
++    --reference ../data/newstest2014.de \
++    --beam-size 1 \
++    --batch-size 1 \
++    --math fp16 \
++    --dataset-dir ../data \
++    --cuda \
++    --backend nnrt \
++    --ir-file /path/to/ir-file \
++    --mode accuracy
++```
++
++Evaluate model performance
++
++```
++python3 translate.py \
++    --input ../data/newstest2014.tok.clean.bpe.32000.en \
++    --output output_file \
++    --model model_best.pth \
++    --reference ../data/newstest2014.de \
++    --beam-size 1 \
++    --batch-size 1 \
++    --math fp16 \
++    --dataset-dir ../data \
++    --cuda \
++    --backend nnrt \
++    --ir-file /path/to/ir-file \
++    --mode performance
++```
+diff --git a/rnn_translator/.gitignore b/rnn_translator/.gitignore
+index ecd883f..d3b3ea4 100644
+--- a/rnn_translator/.gitignore
++++ b/rnn_translator/.gitignore
+@@ -3,3 +3,4 @@ tags
+ /data
+ /results
+ *.log
++*.pth
+\ No newline at end of file
+diff --git a/rnn_translator/download_dataset.sh b/rnn_translator/download_dataset.sh
+index e4ec0ae..236fc5a 100644
+--- a/rnn_translator/download_dataset.sh
++++ b/rnn_translator/download_dataset.sh
+@@ -25,21 +25,21 @@ OUTPUT_DIR_DATA="${OUTPUT_DIR}/data"
+ mkdir -p $OUTPUT_DIR_DATA
+ 
+ echo "Downloading Europarl v7. This may take a while..."
+-wget -nc -nv -O ${OUTPUT_DIR_DATA}/europarl-v7-de-en.tgz \
++wget -nc -nv --no-check-certificate -O ${OUTPUT_DIR_DATA}/europarl-v7-de-en.tgz \
+   http://www.statmt.org/europarl/v7/de-en.tgz
+ 
+ echo "Downloading Common Crawl corpus. This may take a while..."
+-wget -nc -nv -O ${OUTPUT_DIR_DATA}/common-crawl.tgz \
++wget -nc -nv --no-check-certificate -O ${OUTPUT_DIR_DATA}/common-crawl.tgz \
+   http://www.statmt.org/wmt13/training-parallel-commoncrawl.tgz
+ 
+ echo "Downloading News Commentary v11. This may take a while..."
+-wget -nc -nv -O ${OUTPUT_DIR_DATA}/nc-v11.tgz \
++wget -nc -nv --no-check-certificate -O ${OUTPUT_DIR_DATA}/nc-v11.tgz \
+   http://data.statmt.org/wmt16/translation-task/training-parallel-nc-v11.tgz
+ 
+ echo "Downloading dev/test sets"
+-wget -nc -nv -O  ${OUTPUT_DIR_DATA}/dev.tgz \
++wget -nc -nv --no-check-certificate -O  ${OUTPUT_DIR_DATA}/dev.tgz \
+   http://data.statmt.org/wmt16/translation-task/dev.tgz
+-wget -nc -nv -O  ${OUTPUT_DIR_DATA}/test.tgz \
++wget -nc -nv --no-check-certificate -O  ${OUTPUT_DIR_DATA}/test.tgz \
+   http://data.statmt.org/wmt16/translation-task/test.tgz
+ 
+ # Extract everything
+diff --git a/rnn_translator/pytorch/requirements.txt b/rnn_translator/pytorch/requirements.txt
+index bff6214..9599e6f 100644
+--- a/rnn_translator/pytorch/requirements.txt
++++ b/rnn_translator/pytorch/requirements.txt
+@@ -1,3 +1,7 @@
+-sacrebleu==1.2.10
+-numpy==1.14.2
++# Please keep same version
++# 2 option to install sacrebleu
++# 1): pip install sacrebleu,  by default sacrebleu executable is installed in DIR:/home/user/.local/bin/sacrebleu , export PATH=$PATH:/home/user/.local/bin
++# 2): sudo pip install sacrebleu, by default sacrebleu executable is installed in /usr/local/bin, do not need to add to PATH
++sacrebleu==1.2.10   
++numpy
+ mlperf-compliance==0.0.4
+diff --git a/rnn_translator/pytorch/run_eval.sh b/rnn_translator/pytorch/run_eval.sh
+new file mode 100755
+index 0000000..288c8f7
+--- /dev/null
++++ b/rnn_translator/pytorch/run_eval.sh
+@@ -0,0 +1,15 @@
++#!/bin/bash
++
++python3 translate.py \
++    --input ../data/newstest2014.tok.clean.bpe.32000.en \
++    --output output_file \
++    --model model_best.pth \
++    --reference ../data/newstest2014.de \
++    --beam-size 1 \
++    --batch-size 1 \
++    --math fp16 \
++    --dataset-dir ../data \
++    --cuda \
++    --backend NNCompiler \
++    --mode accuracy  # [performance, accuracy]
++    # --graph-file path_to_model/gnmt.torchscript
+diff --git a/rnn_translator/pytorch/run.sh b/rnn_translator/pytorch/run_training.sh
+similarity index 100%
+rename from rnn_translator/pytorch/run.sh
+rename to rnn_translator/pytorch/run_training.sh
+diff --git a/rnn_translator/pytorch/seq2seq/inference/beam_search.py b/rnn_translator/pytorch/seq2seq/inference/beam_search.py
+index d5cabac..0e7ab53 100644
+--- a/rnn_translator/pytorch/seq2seq/inference/beam_search.py
++++ b/rnn_translator/pytorch/seq2seq/inference/beam_search.py
+@@ -1,12 +1,14 @@
+ import torch
++import torch.nn as nn
+ 
+ from mlperf_compliance import mlperf_log
+ 
+ from seq2seq.data.config import BOS
+ from seq2seq.data.config import EOS
++from typing import Dict, List, Tuple, Optional
+ 
+ 
+-class SequenceGenerator(object):
++class SequenceGenerator(nn.Module):
+     def __init__(self,
+                  model,
+                  beam_size=5,
+@@ -15,7 +17,7 @@ class SequenceGenerator(object):
+                  len_norm_factor=0.6,
+                  len_norm_const=5,
+                  cov_penalty_factor=0.1):
+-
++        super(SequenceGenerator, self). __init__()
+         self.model = model
+         self.cuda = cuda
+         self.beam_size = beam_size
+@@ -37,7 +39,9 @@ class SequenceGenerator(object):
+         mlperf_log.gnmt_print(key=mlperf_log.EVAL_HP_COV_PENALTY_FACTOR,
+                               value=self.cov_penalty_factor)
+ 
+-    def greedy_search(self, batch_size, initial_input, initial_context=None):
++    @torch.jit.export
++    def greedy_search(self, batch_size, initial_input, initial_context):
++        # type: (int, Tensor, List[Tensor]) -> Tuple[Tensor, Tensor, int]
+         max_seq_len = self.max_seq_len
+ 
+         translation = torch.zeros(batch_size, max_seq_len, dtype=torch.int64)
+@@ -51,7 +55,7 @@ class SequenceGenerator(object):
+             active = active.cuda()
+             base_mask = base_mask.cuda()
+ 
+-        translation[:, 0] = BOS
++        translation[:, 0] = 2
+         words, context = initial_input, initial_context
+ 
+         if self.batch_first:
+@@ -74,7 +78,7 @@ class SequenceGenerator(object):
+             translation[active, idx] = words
+             lengths[active] += 1
+ 
+-            terminating = (words == EOS)
++            terminating = (words == 3)
+ 
+             if terminating.any():
+                 not_terminating = ~terminating
+@@ -90,7 +94,9 @@ class SequenceGenerator(object):
+ 
+         return translation, lengths, counter
+ 
+-    def beam_search(self, batch_size, initial_input, initial_context=None):
++    @torch.jit.export
++    def beam_search(self, batch_size, initial_input, initial_context):
++        # type: (int, Tensor, List[Tensor]) -> Tuple[Tensor, Tensor, int] 
+         beam_size = self.beam_size
+         norm_const = self.len_norm_const
+         norm_factor = self.len_norm_factor
+@@ -105,7 +111,7 @@ class SequenceGenerator(object):
+         base_mask = torch.arange(0, batch_size * beam_size, dtype=torch.int64)
+         global_offset = torch.arange(0, batch_size * beam_size, beam_size, dtype=torch.int64)
+ 
+-        eos_beam_fill = torch.tensor([0] + (beam_size - 1) * [float('-inf')])
++        eos_beam_fill = torch.tensor([0.0] + (beam_size - 1) * [float('-inf')])
+ 
+         if self.cuda:
+             translation = translation.cuda()
+@@ -116,9 +122,10 @@ class SequenceGenerator(object):
+             global_offset = global_offset.cuda()
+             eos_beam_fill = eos_beam_fill.cuda()
+ 
+-        translation[:, 0] = BOS
++        translation[:, 0] = 2
+ 
+-        words, context = initial_input, initial_context
++        words = initial_input
++        context  = initial_context
+ 
+         if self.batch_first:
+             word_view = (-1, 1)
+@@ -161,10 +168,10 @@ class SequenceGenerator(object):
+                 break
+             counter += 1
+ 
+-            eos_mask = (words == EOS)
++            eos_mask = (words == 3)
+             eos_mask = eos_mask.view(-1, beam_size)
+ 
+-            terminating, _ = eos_mask.min(dim=1)
++            terminating, ret_tmp = eos_mask.min(dim=1)
+ 
+             lengths[active[~eos_mask.view(-1)]] += 1
+ 
+@@ -176,7 +183,7 @@ class SequenceGenerator(object):
+ 
+             # words: (batch, beam, k)
+             words = words.view(-1, beam_size, beam_size)
+-            words = words.masked_fill(eos_mask.unsqueeze(2), EOS)
++            words = words.masked_fill(eos_mask.unsqueeze(2), 3)
+ 
+             # logprobs: (batch, beam, k)
+             logprobs = logprobs.float().view(-1, beam_size, beam_size)
+@@ -193,8 +200,9 @@ class SequenceGenerator(object):
+ 
+             new_scores = new_scores.view(-1, beam_size * beam_size)
+             # index: (batch, beam)
+-            _, index = new_scores.topk(beam_size, dim=1)
+-            source_beam = index / beam_size
++            ret, index = new_scores.topk(beam_size, dim=1)
++            #source_beam = index / beam_size
++            source_beam = torch.floor_divide(index, beam_size)
+ 
+             new_scores = new_scores.view(-1, beam_size * beam_size)
+             best_scores = torch.gather(new_scores, 1, index)
+@@ -256,3 +264,7 @@ class SequenceGenerator(object):
+         lengths = lengths[idx + global_offset]
+ 
+         return translation, lengths, counter
++
++    # torch.jit.unused
++    def forward(self):
++        return True
+diff --git a/rnn_translator/pytorch/seq2seq/inference/inference.py b/rnn_translator/pytorch/seq2seq/inference/inference.py
+index e0ddbd9..933c7ef 100644
+--- a/rnn_translator/pytorch/seq2seq/inference/inference.py
++++ b/rnn_translator/pytorch/seq2seq/inference/inference.py
+@@ -4,9 +4,10 @@ from seq2seq.data.config import BOS
+ from seq2seq.data.config import EOS
+ from seq2seq.inference.beam_search import SequenceGenerator
+ from seq2seq.utils import batch_padded_sequences
++from typing import List, Tuple, Dict
+ 
+ 
+-class Translator(object):
++class Translator(torch.nn.Module):
+ 
+     def __init__(self, model, tok,
+                  beam_size=5,
+@@ -15,7 +16,7 @@ class Translator(object):
+                  cov_penalty_factor=0.1,
+                  max_seq_len=50,
+                  cuda=False):
+-
++        super(Translator, self).__init__()
+         self.model = model
+         self.tok = tok
+         self.insert_target_start = [BOS]
+@@ -33,7 +34,7 @@ class Translator(object):
+             len_norm_factor=len_norm_factor,
+             len_norm_const=len_norm_const,
+             cov_penalty_factor=cov_penalty_factor)
+-
++    @torch.jit.unused
+     def translate(self, input_sentences):
+         stats = {}
+         batch_size = len(input_sentences)
+@@ -81,8 +82,25 @@ class Translator(object):
+             out = self.tok.detokenize(pred)
+             output.append(out)
+ 
+-        stats['total_dec_len'] = int(lengths.sum())
+-        stats['iters'] = counter
++        stats['total_dec_len'] = torch.tensor(int(lengths.sum()))
++        stats['iters'] = torch.tensor(counter)
+ 
+         output = [output[indices.index(i)] for i in range(len(output))]
+         return output, stats
++
++
++    def forward(self, src, src_length, bos):
++        context = self.model.encode(src, src_length)
++
++        if self.batch_first:
++            batch_size = src.size(0)
++        else:
++            batch_size = src.size(1)
++
++        context_new = [context, src_length, torch.zeros(1).cuda()]
++        if self.beam_size == 1:
++            preds, lengths, counter = self.generator.greedy_search(batch_size, bos, context_new)
++        else:
++            preds, lengths, counter = self.generator.beam_search(batch_size, bos, context_new)
++
++        return preds, lengths, counter
+diff --git a/rnn_translator/pytorch/seq2seq/models/attention.py b/rnn_translator/pytorch/seq2seq/models/attention.py
+index 7ead49f..b1403eb 100644
+--- a/rnn_translator/pytorch/seq2seq/models/attention.py
++++ b/rnn_translator/pytorch/seq2seq/models/attention.py
+@@ -12,7 +12,7 @@ class BahdanauAttention(nn.Module):
+     """
+ 
+     def __init__(self, query_size, key_size, num_units, normalize=False,
+-                 dropout=0, batch_first=False):
++                 dropout=0.0, batch_first=False):
+ 
+         super(BahdanauAttention, self).__init__()
+ 
+@@ -26,7 +26,7 @@ class BahdanauAttention(nn.Module):
+         self.linear_att = Parameter(torch.Tensor(num_units))
+ 
+         self.dropout = nn.Dropout(dropout)
+-        self.mask = None
++        self.mask = torch.zeros(10)
+ 
+         if self.normalize:
+             self.normalize_scalar = Parameter(torch.Tensor(1))
+@@ -62,7 +62,9 @@ class BahdanauAttention(nn.Module):
+             max_len = context.size(0)
+ 
+         indices = torch.arange(0, max_len, dtype=torch.int64, device=context.device)
+-        self.mask = indices >= (context_len.unsqueeze(1))
++        #self.mask = indices >= (context_len.unsqueeze(1))
++
++        self.mask = torch.ge(indices, context_len.unsqueeze(1))
+ 
+     def calc_score(self, att_query, att_keys):
+         """
+@@ -92,7 +94,7 @@ class BahdanauAttention(nn.Module):
+         else:
+             linear_att = self.linear_att
+ 
+-        out = F.tanh(sum_qk).matmul(linear_att)
++        out = torch.tanh(sum_qk).matmul(linear_att)
+         return out
+ 
+     def forward(self, query, keys):
+diff --git a/rnn_translator/pytorch/seq2seq/models/decoder.py b/rnn_translator/pytorch/seq2seq/models/decoder.py
+index ccfc3d0..7869fd2 100644
+--- a/rnn_translator/pytorch/seq2seq/models/decoder.py
++++ b/rnn_translator/pytorch/seq2seq/models/decoder.py
+@@ -5,12 +5,13 @@ import torch.nn as nn
+ 
+ from seq2seq.models.attention import BahdanauAttention
+ import seq2seq.data.config as config
++from typing import Dict, List, Tuple
+ 
+ 
+ class RecurrentAttention(nn.Module):
+ 
+     def __init__(self, input_size, context_size, hidden_size, num_layers=1,
+-                 bias=True, batch_first=False, dropout=0):
++                 bias=True, batch_first=False, dropout=0.0):
+ 
+         super(RecurrentAttention, self).__init__()
+ 
+@@ -26,6 +27,7 @@ class RecurrentAttention(nn.Module):
+         # set attention mask, sequences have different lengths, this mask
+         # allows to include only valid elements of context in attention's
+         # softmax
++        # type: (Tensor, Optional[Tuple[Tensor, Tensor]], Tensor, Tensor) -> Tuple[Tensor, Tuple[Tensor, Tensor], Tensor, Tensor]
+         self.attn.set_mask(context_len, context)
+ 
+         rnn_outputs, hidden = self.rnn(inputs, hidden)
+@@ -57,11 +59,12 @@ class Classifier(nn.Module):
+ class ResidualRecurrentDecoder(nn.Module):
+ 
+     def __init__(self, vocab_size, hidden_size=128, num_layers=8, bias=True,
+-                 dropout=0, batch_first=False, math='fp32', embedder=None):
++                 dropout=0.0, batch_first=False, math='fp32', embedder=None):
+ 
+         super(ResidualRecurrentDecoder, self).__init__()
+ 
+         self.num_layers = num_layers
++        self.inference = False
+ 
+         self.att_rnn = RecurrentAttention(hidden_size, hidden_size,
+                                           hidden_size, num_layers=1,
+@@ -81,55 +84,67 @@ class ResidualRecurrentDecoder(nn.Module):
+ 
+         self.classifier = Classifier(hidden_size, vocab_size, math)
+         self.dropout = nn.Dropout(p=dropout)
++        self.next_hidden: List[Tuple(torch.Tensor, torch.Tensor)] = [(torch.rand(1), torch.rand(1))]
+ 
+     def init_hidden(self, hidden):
+-        if hidden is not None:
+-            # per-layer chunks
+-            hidden = hidden.chunk(self.num_layers)
+-            # (h, c) chunks for LSTM layer
+-            hidden = tuple(i.chunk(2) for i in hidden)
+-        else:
+-            hidden = [None] * self.num_layers
+-
+-        self.next_hidden = []
+-        return hidden
++        # type: (Tensor) -> Tuple[Tuple[Tensor, Tensor],Tuple[Tensor, Tensor], Tuple[Tensor, Tensor], Tuple[Tensor, Tensor]]
++        # per-layer chunks
++        hidden_list = hidden.chunk(self.num_layers)
++        # (h, c) chunks for LSTM layer
++        #hidden_final = []
++        #for i in hidden_list:
++        #    i1 = i.chunk(2)
++        #    hidden_final.append(i1)
++        self.next_hidden.clear()
++        return  ((hidden_list[0].chunk(2)[0], hidden_list[0].chunk(2)[1]), \
++                 (hidden_list[1].chunk(2)[0], hidden_list[1].chunk(2)[1]), \
++                 (hidden_list[2].chunk(2)[0], hidden_list[2].chunk(2)[1]), \
++                 (hidden_list[3].chunk(2)[0], hidden_list[3].chunk(2)[1]))
+ 
+     def append_hidden(self, h):
++        # type: (Tuple[Tensor, Tensor])
+         if self.inference:
+             self.next_hidden.append(h)
+ 
+     def package_hidden(self):
+-        if self.inference:
+-            hidden = torch.cat(tuple(itertools.chain(*self.next_hidden)))
+-        else:
+-            hidden = None
++        hidden_l = []
++        for i in range(len(self.next_hidden)):
++            hidden_l.append(self.next_hidden[i][0].cuda())
++            hidden_l.append(self.next_hidden[i][1].cuda())
++        hidden = torch.cat(hidden_l)
+         return hidden
+ 
+     def forward(self, inputs, context, inference=False):
++        # type: (Tensor, List[Tensor], bool) -> Tuple[Tensor, Tensor,  List[Tensor]]
+         self.inference = inference
+ 
+         enc_context, enc_len, hidden = context
+-        hidden = self.init_hidden(hidden)
++        if torch.equal(hidden, torch.zeros(1).cuda()):
++            self.next_hidden.clear()
++            hidden_new = (None, None, None, None)
++        else:
++            hidden_new = self.init_hidden(hidden)
+ 
+         x = self.embedder(inputs)
+ 
+-        x, h, attn, scores = self.att_rnn(x, hidden[0], enc_context, enc_len)
++        x, h, attn, scores = self.att_rnn(x, hidden_new[0], enc_context, enc_len)
+         self.append_hidden(h)
+ 
+         x = self.dropout(x)
+         x = torch.cat((x, attn), dim=2)
+-        x, h = self.rnn_layers[0](x, hidden[1])
++        x, h = self.rnn_layers[0](x, hidden_new[1])
+         self.append_hidden(h)
+ 
+-        for i in range(1, len(self.rnn_layers)):
+-            residual = x
+-            x = self.dropout(x)
+-            x = torch.cat((x, attn), dim=2)
+-            x, h = self.rnn_layers[i](x, hidden[i + 1])
+-            self.append_hidden(h)
+-            x = x + residual
++        for i, rnn_layer in enumerate(self.rnn_layers):
++            if i >= 1 and i < 3:
++                residual = x
++                x = self.dropout(x)
++                x = torch.cat((x, attn), dim=2)
++                x, h = rnn_layer(x, hidden_new[i + 1])
++                self.append_hidden(h)
++                x = x + residual
+ 
+         x = self.classifier(x)
+-        hidden = self.package_hidden()
++        hidden_final = self.package_hidden()
+ 
+-        return x, scores, [enc_context, enc_len, hidden]
++        return x, scores, [enc_context, enc_len, hidden_final]
+diff --git a/rnn_translator/pytorch/seq2seq/models/encoder.py b/rnn_translator/pytorch/seq2seq/models/encoder.py
+index 0f74a6e..0958d31 100644
+--- a/rnn_translator/pytorch/seq2seq/models/encoder.py
++++ b/rnn_translator/pytorch/seq2seq/models/encoder.py
+@@ -3,12 +3,12 @@ from torch.nn.utils.rnn import pack_padded_sequence
+ from torch.nn.utils.rnn import pad_packed_sequence
+ 
+ import seq2seq.data.config as config
+-
++import torch
+ 
+ class ResidualRecurrentEncoder(nn.Module):
+ 
+     def __init__(self, vocab_size, hidden_size=128, num_layers=8, bias=True,
+-                 dropout=0, batch_first=False, embedder=None):
++                 dropout=0.0, batch_first=False, embedder=None):
+ 
+         super(ResidualRecurrentEncoder, self).__init__()
+         self.batch_first = batch_first
+@@ -38,7 +38,7 @@ class ResidualRecurrentEncoder(nn.Module):
+         x = self.embedder(inputs)
+ 
+         # bidirectional layer
+-        x = pack_padded_sequence(x, lengths.cpu().numpy(),
++        x = pack_padded_sequence(x, lengths.cpu(),
+                                  batch_first=self.batch_first)
+         x, _ = self.rnn_layers[0](x)
+         x, _ = pad_packed_sequence(x, batch_first=self.batch_first)
+@@ -49,10 +49,14 @@ class ResidualRecurrentEncoder(nn.Module):
+ 
+         # the rest of unidirectional layers,
+         # with residual connections starting from 3rd layer
+-        for i in range(2, len(self.rnn_layers)):
+-            residual = x
+-            x = self.dropout(x)
+-            x, _ = self.rnn_layers[i](x)
+-            x = x + residual
++        residual = x
++        x = self.dropout(x)
++        x, _ = self.rnn_layers[2](x)
++        x = x + residual
++
++        residual = x
++        x = self.dropout(x)
++        x, _ = self.rnn_layers[3](x)
++        x = x + residual
+ 
+         return x
+diff --git a/rnn_translator/pytorch/seq2seq/models/gnmt.py b/rnn_translator/pytorch/seq2seq/models/gnmt.py
+index ff949ab..3165b6e 100644
+--- a/rnn_translator/pytorch/seq2seq/models/gnmt.py
++++ b/rnn_translator/pytorch/seq2seq/models/gnmt.py
+@@ -6,7 +6,7 @@ import seq2seq.data.config as config
+ from .seq2seq_base import Seq2Seq
+ from .decoder import ResidualRecurrentDecoder
+ from .encoder import ResidualRecurrentEncoder
+-
++import torch
+ 
+ class GNMT(Seq2Seq):
+     def __init__(self, vocab_size, hidden_size=512, num_layers=8, bias=True,
+@@ -36,7 +36,7 @@ class GNMT(Seq2Seq):
+                                                 batch_first, math, embedder)
+ 
+ 
+-
++    @torch.jit.unused
+     def forward(self, input_encoder, input_enc_len, input_decoder):
+         context = self.encode(input_encoder, input_enc_len)
+         context = (context, input_enc_len, None)
+diff --git a/rnn_translator/pytorch/seq2seq/models/seq2seq_base.py b/rnn_translator/pytorch/seq2seq/models/seq2seq_base.py
+index 844a3c4..d32229b 100644
+--- a/rnn_translator/pytorch/seq2seq/models/seq2seq_base.py
++++ b/rnn_translator/pytorch/seq2seq/models/seq2seq_base.py
+@@ -13,9 +13,11 @@ class Seq2Seq(nn.Module):
+         return self.encoder(inputs, lengths)
+ 
+     def decode(self, inputs, context, inference=False):
++        # type: (Tensor, List[Tensor], bool) -> Tuple[Tensor, Tensor, List[Tensor]]
+         return self.decoder(inputs, context, inference)
+ 
+     def generate(self, inputs, context, beam_size):
++        # type: (Tensor, List[Tensor], int) -> Tuple[Tensor, Tensor, Tensor, List[Tensor]]
+         logits, scores, new_context = self.decode(inputs, context, True)
+         logprobs = log_softmax(logits, dim=-1)
+         logprobs, words = logprobs.topk(beam_size, dim=-1)
+diff --git a/rnn_translator/pytorch/translate.py b/rnn_translator/pytorch/translate.py
+index 47bc374..4830394 100644
+--- a/rnn_translator/pytorch/translate.py
++++ b/rnn_translator/pytorch/translate.py
+@@ -1,4 +1,19 @@
+-#!/usr/bin/env python
++
++# Copyright 2019 The MLPerf Authors. All Rights Reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++# =============================================================================
++
+ import argparse
+ import codecs
+ import time
+@@ -11,6 +26,12 @@ import torch
+ from seq2seq import models
+ from seq2seq.inference.inference import Translator
+ from seq2seq.utils import AverageMeter
++import subprocess
++import os
++import seq2seq.data.config as config
++from seq2seq.data.dataset import ParallelDataset
++import logging
++from seq2seq.utils import AverageMeter
+ 
+ 
+ def parse_args():
+@@ -18,12 +39,18 @@ def parse_args():
+                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+     # data
+     dataset = parser.add_argument_group('data setup')
++    dataset.add_argument('--dataset-dir', default=None, required=True,
++                         help='path to directory with input data')
+     dataset.add_argument('-i', '--input', required=True,
+                          help='input file (tokenized)')
+     dataset.add_argument('-o', '--output', required=True,
+                          help='output file (tokenized)')
+     dataset.add_argument('-m', '--model', required=True,
+                          help='model checkpoint file')
++    dataset.add_argument('-r', '--reference', default=None,
++                         help='full path to the file with reference \
++                         translations (for sacrebleu)')
++
+     # parameters
+     params = parser.add_argument_group('inference setup')
+     params.add_argument('--batch-size', default=128, type=int,
+@@ -40,8 +67,16 @@ def parse_args():
+                         help='length normalization constant')
+     # general setup
+     general = parser.add_argument_group('general setup')
++
++    general.add_argument('--mode', default='accuracy', choices=['accuracy',
++                                                                'performance'], help='test in accuracy or performance mode')
++
+     general.add_argument('--math', default='fp16', choices=['fp32', 'fp16'],
+                          help='arithmetic type')
++    general.add_argument('--backend', default='pytorch', choices=['pytorch', 'NNCompiler'],
++                         help='backend type')
++    general.add_argument('--graph-file', default=None,
++                         help='path to gnmt graph file (torchscript model, required by NNCompiler')
+ 
+     batch_first_parser = general.add_mutually_exclusive_group(required=False)
+     batch_first_parser.add_argument('--batch-first', dest='batch_first',
+@@ -115,6 +150,8 @@ def main():
+         raise RuntimeError('fp16 requires cuda')
+     if not args.cudnn:
+         torch.backends.cudnn.enabled = False
++    if args.backend == 'NNCompiler' and not args.cuda:
++        raise RuntimeError('NNCompiler requires cuda')
+ 
+     checkpoint = torch.load(args.model, map_location={'cuda:0': 'cpu'})
+ 
+@@ -142,82 +179,204 @@ def main():
+ 
+     tokenizer = checkpoint['tokenizer']
+ 
+-    translation_model = Translator(model,
+-                                   tokenizer,
+-                                   beam_size=args.beam_size,
+-                                   max_seq_len=args.max_seq_len,
+-                                   len_norm_factor=args.len_norm_factor,
+-                                   len_norm_const=args.len_norm_const,
+-                                   cov_penalty_factor=args.cov_penalty_factor,
+-                                   cuda=args.cuda)
++    test_data = ParallelDataset(
++        src_fname=os.path.join(args.dataset_dir, config.SRC_TEST_FNAME),
++        tgt_fname=os.path.join(args.dataset_dir, config.TGT_TEST_FNAME),
++        tokenizer=tokenizer,
++        min_len=0,
++        max_len=150,
++        sort=False)
++
++    test_loader = test_data.get_loader(batch_size=args.batch_size,
++                                       batch_first=True,
++                                       shuffle=False,
++                                       num_workers=0,
++                                       drop_last=False,
++                                       distributed=False)
++
++    translator = Translator(model,
++                            tokenizer,
++                            beam_size=args.beam_size,
++                            max_seq_len=args.max_seq_len,
++                            len_norm_factor=args.len_norm_factor,
++                            len_norm_const=args.len_norm_const,
++                            cov_penalty_factor=args.cov_penalty_factor,
++                            cuda=args.cuda)
+ 
+-    output_file = codecs.open(args.output, 'w', encoding='UTF-8')
+-
+-    # run model on generated data, for accurate timings starting from 1st batch
+-    dummy_data = ['abc ' * (args.max_seq_len // 4)] * args.batch_size
+-    translation_model.translate(dummy_data)
+-
+-    if args.cuda:
+-        torch.cuda.synchronize()
++    model.eval()
++    torch.cuda.empty_cache()
++    script_module = torch.jit.script(translator)
++    frozen_module = torch.jit.freeze(script_module.eval())
++
++    if args.backend == 'NNCompiler':
++        import NNCompiler
++        graph_file = args.graph_file
++        if graph_file is None:
++            torch.jit.save(frozen_module, "gnmt.torch")
++            graph_file = "./gnmt.torch"
++        nncompiler = NNCompiler.PipelineManager(graph_file, "GNMT")
++    # only write the output to file in accuracy mode
++    if args.mode == 'accuracy':
++        test_file = open(args.output, 'w', encoding='UTF-8')
+ 
+     batch_time = AverageMeter(False)
+-    enc_tok_per_sec = AverageMeter(False)
+-    dec_tok_per_sec = AverageMeter(False)
+     tot_tok_per_sec = AverageMeter(False)
+-
++    iterations = AverageMeter(False)
+     enc_seq_len = AverageMeter(False)
+     dec_seq_len = AverageMeter(False)
+-
+-    total_lines = 0
+-    total_iters = 0
+-    with codecs.open(args.input, encoding='UTF-8') as input_file:
+-        for idx, lines in enumerate(grouper(input_file, args.batch_size)):
+-            lines = [l for l in lines if l]
+-            n_lines = len(lines)
+-            total_lines += n_lines
+-
+-            translate_timer = time.time()
+-            translated_lines, stats = translation_model.translate(lines)
+-            elapsed = time.time() - translate_timer
+-
+-            batch_time.update(elapsed, n_lines)
+-            etps = stats['total_enc_len'] / elapsed
+-            dtps = stats['total_dec_len'] / elapsed
+-            enc_seq_len.update(stats['total_enc_len'] / n_lines, n_lines)
+-            dec_seq_len.update(stats['total_dec_len'] / n_lines, n_lines)
+-            enc_tok_per_sec.update(etps, n_lines)
+-            dec_tok_per_sec.update(dtps, n_lines)
+-
+-            tot_tok = stats['total_dec_len'] + stats['total_enc_len']
+-            ttps = tot_tok / elapsed
+-            tot_tok_per_sec.update(ttps, n_lines)
+-
+-            n_iterations = stats['iters']
+-            total_iters += n_iterations
+-
+-            write_output(output_file, translated_lines)
+-
+-            if idx % args.print_freq == args.print_freq - 1:
+-                print(f'TRANSLATION: '
+-                      f'Batch {idx} '
+-                      f'Iters {n_iterations}\t'
+-                      f'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+-                      f'Tot tok/s {tot_tok_per_sec.val:.0f} ({tot_tok_per_sec.avg:.0f})\t'
+-                      f'Enc tok/s {enc_tok_per_sec.val:.0f} ({enc_tok_per_sec.avg:.0f})\t'
+-                      f'Dec tok/s {dec_tok_per_sec.val:.0f} ({dec_tok_per_sec.avg:.0f})')
+-
+-    output_file.close()
+-
+-    print(f'TRANSLATION SUMMARY:\n'
+-          f'Lines translated: {total_lines}\t'
+-          f'Avg time per batch: {batch_time.avg:.3f} s\t'
+-          f'Avg time per sentence: {1000*(batch_time.avg / args.batch_size):.3f} ms\n'
+-          f'Avg enc seq len: {enc_seq_len.avg:.2f}\t'
+-          f'Avg dec seq len: {dec_seq_len.avg:.2f}\t'
+-          f'Total iterations: {total_iters}\t\n'
+-          f'Avg tot tok/s: {tot_tok_per_sec.avg:.0f}\t'
+-          f'Avg enc tok/s: {enc_tok_per_sec.avg:.0f}\t'
+-          f'Avg dec tok/s: {dec_tok_per_sec.avg:.0f}')
++    stats = {}
++    for i, (src, tgt, indices) in enumerate(test_loader):
++        if i == 0:
++            for run_cnt in range(5):
++                # warm-up run
++                src_w, src_length = src
++
++                if translator.batch_first:
++                    batch_size = src_w.size(0)
++                else:
++                    batch_size = src_w.size(1)
++                beam_size = args.beam_size
++
++                bos = [translator.insert_target_start] * (batch_size * beam_size)
++                bos = torch.LongTensor(bos)
++                if translator.batch_first:
++                    bos = bos.view(-1, 1)
++                else:
++                    bos = bos.view(1, -1)
++
++                src_length = torch.LongTensor(src_length)
++                stats['total_enc_len'] = int(src_length.sum())
++
++                if args.cuda:
++                    src_w = src_w.cuda()
++                    src_length = src_length.cuda()
++                    bos = bos.cuda()
++
++                with torch.no_grad():
++                    if args.backend == 'pytorch':
++                        preds, lengths, counter = frozen_module(src_w, src_length, bos)
++                    if args.backend == 'NNCompiler':
++                        preds, lengths, counter = nncompiler.inferenceModel(
++                            [src_w, src_length, bos])
++                        counter = counter.cpu()[0]
++                stats['total_dec_len'] = lengths.sum().item()
++                stats['iters'] = counter
++
++                preds = preds.cpu()
++                lengths = lengths.cpu()
++                
++        translate_timer = time.time()
++        src, src_length = src
++
++        if translator.batch_first:
++            batch_size = src.size(0)
++        else:
++            batch_size = src.size(1)
++        beam_size = args.beam_size
++
++        bos = [translator.insert_target_start] * (batch_size * beam_size)
++        bos = torch.LongTensor(bos)
++        if translator.batch_first:
++            bos = bos.view(-1, 1)
++        else:
++            bos = bos.view(1, -1)
++
++        src_length = torch.LongTensor(src_length)
++        stats['total_enc_len'] = int(src_length.sum())
++
++        if args.cuda:
++            src = src.cuda()
++            src_length = src_length.cuda()
++            bos = bos.cuda()
++
++        with torch.no_grad():
++            if args.backend == 'pytorch':
++                preds, lengths, counter = frozen_module(src, src_length, bos)
++            if args.backend == 'NNCompiler':
++                preds, lengths, counter = nncompiler.inferenceModel(
++                    [src, src_length, bos])
++                counter = counter.cpu()[0]
++        stats['total_dec_len'] = lengths.sum().item()
++        stats['iters'] = counter
++
++        preds = preds.cpu()
++        lengths = lengths.cpu()
++
++        output = []
++        for idx, pred in enumerate(preds):
++            end = lengths[idx] - 1
++            pred = pred[1: end]
++            pred = pred.tolist()
++            out = translator.tok.detokenize(pred)
++            output.append(out)
++
++        # only write the output to file in accuracy mode
++        if args.mode == 'accuracy':
++            output = [output[indices.index(i)] for i in range(len(output))]
++            for line in output:
++                test_file.write(line)
++                test_file.write('\n')
++
++        # Get timing
++        elapsed = time.time() - translate_timer
++        batch_time.update(elapsed, batch_size)
++
++        total_tokens = stats['total_dec_len'] + stats['total_enc_len']
++        ttps = total_tokens / elapsed
++        tot_tok_per_sec.update(ttps, batch_size)
++
++        iterations.update(stats['iters'])
++        enc_seq_len.update(stats['total_enc_len'] / batch_size, batch_size)
++        dec_seq_len.update(stats['total_dec_len'] / batch_size, batch_size)
++
++        if i % 5 == 0:
++            log = []
++            log += f'TEST '
++            log += f'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
++            log += f'Decoder iters {iterations.val:.1f} ({iterations.avg:.1f})\t'
++            log += f'Tok/s {tot_tok_per_sec.val:.0f} ({tot_tok_per_sec.avg:.0f})'
++            log = ''.join(log)
++            print(log)
++
++    # summary timing
++    time_per_sentence = (batch_time.avg / batch_size)
++    log = []
++    log += f'TEST SUMMARY:\n'
++    log += f'Lines translated: {len(test_loader.dataset)}\t'
++    log += f'Avg total tokens/s: {tot_tok_per_sec.avg:.0f}\n'
++    log += f'Avg time per batch: {batch_time.avg:.3f} s\t'
++    log += f'Avg time per sentence: {1000*time_per_sentence:.3f} ms\n'
++    log += f'Avg encoder seq len: {enc_seq_len.avg:.2f}\t'
++    log += f'Avg decoder seq len: {dec_seq_len.avg:.2f}\t'
++    log += f'Total decoder iterations: {int(iterations.sum)}'
++    log = ''.join(log)
++    print(log)
++
++    # only write the output to file in accuracy mode
++    if args.mode == 'accuracy':
++        test_file.close()
++
++        test_path = args.output
++        # run moses detokenizer
++        detok_path = os.path.join(args.dataset_dir, config.DETOKENIZER)
++        detok_test_path = test_path + '.detok'
++
++        with open(detok_test_path, 'w') as detok_test_file, \
++                open(test_path, 'r') as test_file:
++            subprocess.run(['perl', f'{detok_path}'], stdin=test_file,
++                           stdout=detok_test_file, stderr=subprocess.DEVNULL)
++
++        # run sacrebleu
++        reference_path = os.path.join(args.dataset_dir,
++                                      config.TGT_TEST_TARGET_FNAME)
++        sacrebleu = subprocess.run([f'sacrebleu --input {detok_test_path} \
++                                    {reference_path} --score-only -lc --tokenize intl'],
++                                   stdout=subprocess.PIPE, shell=True)
++        bleu = float(sacrebleu.stdout.strip())
++
++        print(f'BLEU on test dataset: {bleu}')
++
++        print(f'Finished evaluation on test set')
+ 
+ if __name__ == '__main__':
+     main()
+-- 
+2.17.1
+

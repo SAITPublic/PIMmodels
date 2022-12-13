@@ -84,6 +84,7 @@ if [ ! -d "$repo_name/src" ]; then
     pip3 install --trusted-host pypi.org --trusted-host files.pythonhosted.org tensorflow
     pip3 install --trusted-host pypi.org --trusted-host files.pythonhosted.org pytorch_lightning==1.5.10
     pip3 install --trusted-host pypi.org --trusted-host files.pythonhosted.org sklearn
+    pip3 install --trusted-host pypi.org --trusted-host files.pythonhosted.org scikit-learn
     pip3 install --trusted-host pypi.org --trusted-host files.pythonhosted.org -r handwritten-text-recognition/requirements.txt
 fi
 

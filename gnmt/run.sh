@@ -6,6 +6,9 @@ use_pim=false
 repo_name="training"
 repo_url="https://github.com/mlcommons/training.git"
 
+export PATH=/home/user/.local/bin:$PATH
+export PYTHONPATH=/opt/rocm/lib:$PYTHONPATH
+
 function log()
 {
     echo -e " \033[92;1m"$1"\033[m"
@@ -87,8 +90,6 @@ if [ ! -d "$repo_name/rnn_translator" ]; then
     pushd "$working_dir/training/rnn_translator/pytorch"
     pip3 install --trusted-host pypi.org --trusted-host files.pythonhosted.org -r requirements.txt
     pip3 install --trusted-host pypi.org --trusted-host files.pythonhosted.org sacrebleu
-    export PATH=/home/user/.local/bin:$PATH
-    export PYTHONPATH=/opt/rocm/lib:$PYTHONPATH
     popd
 fi
 
@@ -130,16 +131,18 @@ options="--input ../data/newstest2014.tok.clean.bpe.32000.en \
          --dataset-dir ../data \
          --cuda"
 
-if $use_pim; then
-    log "enable PIM"
-    options="${options} --backend=NNCompiler"
-fi
-
 if $accuracy_test; then
     log "measure Accuracy"
     options="${options} --mode accuracy"
 fi
 
-log "run evaluation with options : $options"
-python3 translate.py $options
+if $use_pim; then
+    options="${options} --backend=NNCompiler"
+    log "run evaluation with options : $options"
+    ENABLE_PIM=1 python3 translate.py $options
+else
+    log "run evaluation with options : $options"
+    ENABLE_PIM=0 python3 translate.py $options
+fi
+
 popd

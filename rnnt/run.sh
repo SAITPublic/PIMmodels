@@ -92,7 +92,7 @@ if [ ! -d "$repo_name/speech_recognition" ]; then
 
     # Installation of prerequisites
     log "Install python3 requirements"
-    pip3 install --trusted-host pypi.org --trusted-host files.pythonhosted.org absl-py numpy unidecode inflect tqdm toml librosa
+    pip3 install --trusted-host pypi.org --trusted-host files.pythonhosted.org absl-py numpy unidecode inflect tqdm toml librosa pandas
 
     if [ ! -x "sox" ]; then
         sudo apt install sox

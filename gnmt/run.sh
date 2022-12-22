@@ -56,6 +56,7 @@ function patch_for_pim()
             rm $patch_file
         done
     fi
+    popd
 }
 
 while [ ! -z "$1" ]; do

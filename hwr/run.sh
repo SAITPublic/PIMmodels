@@ -102,15 +102,20 @@ popd
 # Run model
 pushd "$working_dir/handwritten-text-recognition/src"
 options="--arch=puigcerver --source=iam --test --batch_size=1 --epochs=100 --gpus 1 --resume_from --checkpoint=last.ckpt --precision=FP16"
-if $use_pim; then
-    log "enable PIM"
-    options="${options} --backend=NNCompiler"
-fi
 
 if $accuracy_test; then
     log "measure Accuracy"
     options="${options} --accuracy"
 fi
-log "run evaluation with options : $options"
-python3 pytorch_test.py $options
+
+if $use_pim; then
+    log "enable PIM"
+    options="${options} --backend=NNCompiler"
+    log "run evaluation with options : $options"
+    ENABLE_PIM=1 python3 pytorch_test.py $options
+else
+    options="${options} --backend=pytorch"
+    log "run evaluation with options : $options"
+    ENABLE_PIM=0 python3 pytorch_test.py $options
+fi
 popd

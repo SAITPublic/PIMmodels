@@ -140,16 +140,19 @@ options="--dataset_dir ${work_dir}/local_data \
          --scenario SingleStream \
          --log_dir ${work_dir}/run_logs/test/fp16/SingleStream"
 
-if $use_pim; then
-    log "enable PIM"
-    options="${options} --backend=NNCompiler"
-fi
-
 if $accuracy_test; then
     log "measure Accuracy"
     options="${options} --accuracy"
 fi
 
-log "run evaluation with options : $options"
-python3 run.py $options
+if $use_pim; then
+    log "enable PIM"
+    options="${options} --backend=NNCompiler"
+    log "run evaluation with options : $options"
+    ENABLE_PIM=1 python3 run.py $options
+else
+    options="${options} --backend=pytorch"
+    log "run evaluation with options : $options"
+    ENABLE_PIM=0 python3 run.py $options
+fi
 popd

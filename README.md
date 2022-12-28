@@ -40,3 +40,9 @@ $ cd (gnmt|rnnt|hwr ...)
 $ ./run.sh --use_pim
 ```
 
+## Known issues
+
+|Model|Issues|Status|
+|------|---|------|
+|GNMT|Occasionally the output of GPU-PIM is inaccuracte in comparison with the output of GPU.|In progress|
+
